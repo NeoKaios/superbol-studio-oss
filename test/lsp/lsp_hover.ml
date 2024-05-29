@@ -168,6 +168,68 @@ let%expect_test "hover-replaced" =
     "B" "C"
     ``` |}];;
 
+let%expect_test "hover-replaced-vars" =
+  let { projdir; end_with_postproc }, server = make_lsp_project () in
+  print_hovered server ~projdir @@ extract_position_markers {cobol|
+       REPLACE ==DISPLAY FOO== BY ==DISPLAY FOO BAR "B"==.
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. PROG.
+       DATA DIVISION.
+       WORKING-STORAGE SECTION.
+       01 FOO PIC X.
+       01 BAR PIC X.
+       PROCEDURE DIVISION.
+         DISP_|_LAY FO_|_O.
+         DISPLAY BA_|_R.
+         STOP RUN.
+    |cobol};
+  end_with_postproc [%expect.output];
+  [%expect {|
+    {"params":{"diagnostics":[],"uri":"file://__rootdir__/prog.cob"},"method":"textDocument/publishDiagnostics","jsonrpc":"2.0"}
+    (line 9, character 13):
+    __rootdir__/prog.cob:10.9-10.20:
+       7          01 FOO PIC X.
+       8          01 BAR PIC X.
+       9          PROCEDURE DIVISION.
+      10 >          DISPLAY FOO.
+    ----            ^^^^^^^^^^^
+      11            DISPLAY BAR.
+      12            STOP RUN.
+    ```cobol
+    BAR
+    ```
+    USAGE DISPLAY
+    ALPHANUMERIC(1)
+    (line 9, character 19):
+    __rootdir__/prog.cob:10.9-10.20:
+       7          01 FOO PIC X.
+       8          01 BAR PIC X.
+       9          PROCEDURE DIVISION.
+      10 >          DISPLAY FOO.
+    ----            ^^^^^^^^^^^
+      11            DISPLAY BAR.
+      12            STOP RUN.
+    ```cobol
+    BAR
+    ```
+    USAGE DISPLAY
+    ALPHANUMERIC(1)
+    (line 10, character 19):
+    __rootdir__/prog.cob:11.17-11.20:
+       8          01 BAR PIC X.
+       9          PROCEDURE DIVISION.
+      10            DISPLAY FOO.
+      11 >          DISPLAY BAR.
+    ----                    ^^^
+      12            STOP RUN.
+      13
+    ```cobol
+    BAR
+    ```
+    USAGE DISPLAY
+    ALPHANUMERIC(1) |}];;
+
+
 (* Hover typedef vars *)
 
 let%expect_test "hover-typedef-vars" =

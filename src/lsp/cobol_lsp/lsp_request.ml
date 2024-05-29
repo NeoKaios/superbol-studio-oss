@@ -507,6 +507,13 @@ let handle_hover registry (params: HoverParams.t) =
   in
   try_with_main_document_data registry params.textDocument
     ~f:begin fun ~doc:{ artifacts = { pplog; _ }; _ } checked_doc ->
+      let hover_def, loc =
+        try lookup_hover_definition_in_doc params checked_doc
+        with Not_found -> None,None
+      in
+      match hover_def with
+        | Some def  -> hover_markdown ?loc def
+        | None ->
       match find_hovered_pplog_event pplog with
       | Some Replacement { matched_loc = loc;
                            replacement_text = []; _ } ->
@@ -528,14 +535,9 @@ let handle_hover registry (params: HoverParams.t) =
       | Some Replace _
       | Some CompilerDirective _
       | Some Exec_block _
-      | Some Ignored _ ->
-          None
+      | Some Ignored _
       | None ->
-          let hover_def, loc =
-            try lookup_hover_definition_in_doc params checked_doc
-            with Not_found -> None,None
-          in
-          Option.bind hover_def (hover_markdown ?loc)
+          None
     end
 
 (** {3 Completion} *)
