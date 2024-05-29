@@ -219,7 +219,7 @@ let lookup_definition_in_doc ~rootdir
   | { enclosing_compilation_unit_name = None; _ } ->
       None
   | { element_at_position = Some qn;
-      enclosing_compilation_unit_name = Some cu_name } ->
+      enclosing_compilation_unit_name = Some cu_name; _ } ->
       let loc_translator = Lsp_position.loc_translator ~rootdir doc in
       Some (`Location (find_definitions loc_translator cu_name qn group))
 
@@ -267,7 +267,7 @@ let lookup_references_in_doc
                          enclosing_compilation_unit_name = None";
       None
   | { element_at_position = Some qn;
-      enclosing_compilation_unit_name = Some cu_name } ->
+      enclosing_compilation_unit_name = Some cu_name; _ } ->
       let Lsp_position.{ location_of_srcloc; _ } as loc_translator
         = Lsp_position.loc_translator ~rootdir doc in
       let def_locs =
@@ -454,6 +454,8 @@ let handle_semtoks_full,
 
 (** {3 Hover} *)
 
+  let always_show_hover_text_in_data_div = true
+
 let get_hover_text (qn: Cobol_ptree.qualname) (cu: Cobol_unit.Types.cobol_unit) =
   match Cobol_unit.Qualmap.find qn cu.unit_data.data_items.named with
   | data_def ->
@@ -461,12 +463,24 @@ let get_hover_text (qn: Cobol_ptree.qualname) (cu: Cobol_unit.Types.cobol_unit) 
   | exception Cobol_unit.Qualmap.Ambiguous _ ->
       None
 
-let get_hover_text_and_loc cu_name element_at_pos group =
+let get_hover_text_and_loc cu_name element_at_pos parent_element_at_position group =
   let { payload = cu; _ } = CUs.find_by_name cu_name group in
+  let parent_qn = match parent_element_at_position with
+  | Some Data_item { full_qn = Some qn; _ } ->
+      Pretty.to_string "%a" Cobol_ptree.pp_qualname qn
+  | _ -> ""
+  in
   match element_at_pos with
     | Data_item { full_qn = Some qn; def_loc } ->
-        get_hover_text qn cu, Some def_loc
-    | Data_full_name qn | Data_name qn ->
+        if always_show_hover_text_in_data_div then
+          get_hover_text qn cu, Some def_loc
+        else raise Not_found
+    | Data_full_name qn ->
+        let s = Pretty.to_string "%a" Cobol_ptree.pp_qualname qn in
+        if not @@ String.equal s parent_qn || always_show_hover_text_in_data_div
+        then get_hover_text qn cu, Some (Lsp_lookup.baseloc_of_qualname qn)
+        else raise Not_found (* Do not show info of fields in Data div. *)
+    | Data_name qn ->
         get_hover_text qn cu, Some (Lsp_lookup.baseloc_of_qualname qn)
     | Data_item _ | Proc_name _ ->
         raise Not_found
@@ -479,8 +493,9 @@ let lookup_hover_definition_in_doc
   | { enclosing_compilation_unit_name = None; _ } ->
       raise Not_found
   | { element_at_position = Some ele_at_pos;
-      enclosing_compilation_unit_name = Some cu_name } ->
-        get_hover_text_and_loc cu_name ele_at_pos group
+      parent_element_at_position = parent_ele_at_pos;
+      enclosing_compilation_unit_name = Some cu_name; } ->
+        get_hover_text_and_loc cu_name ele_at_pos parent_ele_at_pos group
 
 let handle_hover registry (params: HoverParams.t) =
   let filename = Lsp.Uri.to_path params.textDocument.uri in
