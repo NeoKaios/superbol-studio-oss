@@ -139,7 +139,8 @@ let element_at_position ~uri pos group : element_at_position =
       elt = { elt with element_at_position = Some (Data_name qn) } }
   and on_data_item ?full_qn def_loc ({ elt; _ } as acc) =
     { acc with
-      elt = { elt with element_at_position = Some (Data_item { full_qn; def_loc }) } }
+      elt = { elt with element_at_position = Some (Data_item { full_qn;
+                                                               def_loc }) } }
   and on_proc_name qn ({ elt; context } as acc) =
     let element_at_position = match context with
       | Data_decls -> Some (Proc_name { qn; in_section = None })   (* unlikely *)
