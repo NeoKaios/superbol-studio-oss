@@ -26,7 +26,6 @@ module TYPES = struct
   type element_at_position =
     {
       element_at_position: element_in_context option;
-      parent_element_at_position: element_in_context option;
       enclosing_compilation_unit_name: string option;
     }
   and element_in_context =
@@ -119,8 +118,7 @@ let element_at_position ~uri pos group : element_at_position =
     let init =
       {
         elt = { element_at_position = None;
-                enclosing_compilation_unit_name = None;
-                parent_element_at_position = None };
+                enclosing_compilation_unit_name = None };
         context = Data_decls;                       (* does not really matter *)
       }
 
@@ -140,10 +138,8 @@ let element_at_position ~uri pos group : element_at_position =
     { acc with
       elt = { elt with element_at_position = Some (Data_name qn) } }
   and on_data_item ?full_qn def_loc ({ elt; _ } as acc) =
-    let data_item_opt = Some (Data_item { full_qn; def_loc }) in
     { acc with
-      elt = { elt with element_at_position = data_item_opt;
-                       parent_element_at_position = data_item_opt } }
+      elt = { elt with element_at_position = Some (Data_item { full_qn; def_loc }) } }
   and on_proc_name qn ({ elt; context } as acc) =
     let element_at_position = match context with
       | Data_decls -> Some (Proc_name { qn; in_section = None })   (* unlikely *)
