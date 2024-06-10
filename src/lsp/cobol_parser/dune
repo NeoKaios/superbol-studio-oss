@@ -10,7 +10,7 @@
   (flags (:standard))
   ; use field 'dune-stanzas' to add more stanzas here
   (preprocess (pps ppx_deriving.show))
-  
+
   )
 
 (ocamllex text_categorizer)
@@ -43,6 +43,16 @@
   (action
     (with-stdout-to %{targets}
        (run %{exe:./keywords/gen_keywords.exe} %{deps}
+            --external-tokens Grammar_tokens))))
+
+(rule
+  (targets grammar_expect.ml)
+  (enabled_if (<> %{profile} "release"))
+  (deps    grammar.cmly)
+  (mode    promote)
+  (action
+    (with-stdout-to %{targets}
+       (run %{exe:./expect/gen_expect.exe} %{deps}
             --external-tokens Grammar_tokens))))
 
 (rule
