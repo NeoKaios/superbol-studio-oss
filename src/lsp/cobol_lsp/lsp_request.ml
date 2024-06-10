@@ -560,9 +560,9 @@ let handle_hover registry (params: HoverParams.t) =
 
 let handle_completion registry (params: CompletionParams.t) =
   try_with_main_document_data registry params.textDocument
-    ~f:begin fun ~doc:{ textdoc; _ } { ptree; _ } ->
+    ~f:begin fun ~doc checked_doc->
       let items =
-        Lsp_completion.completion_items textdoc params.position ptree in
+        Lsp_completion.context_completion_items doc checked_doc params.position in
       Some (`CompletionList (CompletionList.create ()
                                ~isIncomplete:false ~items))
     end
