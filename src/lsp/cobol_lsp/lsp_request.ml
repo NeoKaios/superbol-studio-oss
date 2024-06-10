@@ -548,7 +548,7 @@ let handle_hover registry (params: HoverParams.t) =
       match info_hover_text_and_loc, pp_hover_text_and_loc with
         | None, None ->
             None
-        | None, Some (text, loc) | Some (text, loc), None -> 
+        | None, Some (text, loc) | Some (text, loc), None ->
             hover_markdown ~loc text
         | Some(info_text, loc), Some(pp_text, _) ->
             hover_markdown ~loc @@
@@ -697,5 +697,6 @@ module INTERNAL = struct
   let lookup_definition = handle_definition
   let lookup_references = handle_references
   let hover = handle_hover
+  let complete = handle_completion
   let formatting = handle_formatting
 end
