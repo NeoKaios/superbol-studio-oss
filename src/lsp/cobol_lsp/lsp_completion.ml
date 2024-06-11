@@ -106,11 +106,22 @@ let completion_item label ~range ~kind =
       ()
 
 let range (pos:Position.t) text =
-    let line = pos.line in
-    let character = pos.character in
-    let texts = String.split_on_char '\n' @@ Lsp.Text_document.text text in
-    let text_line = List.nth texts line in
-    let index = try 1 + String.rindex_from text_line (character - 1) ' ' with _ -> 1 in
+  let { line; character }: Position.t = pos in
+  let get_nthline s n =
+    let rec inner line_start i : int * int =
+      let line_end = try String.index_from s line_start '\n' with _ -> String.length s in
+      if i >= n
+        then (line_start, line_end)
+        else inner (line_end+1) (i+1)
+      in
+      let (start,end_) = inner 0 0 in
+      String.sub s start (end_-start)
+      in
+    let text_line = get_nthline (Lsp.Text_document.text text) line in
+    let index =
+      try 1 + String.rindex_from text_line (character - 1) ' ' with _ ->
+      try 1 + String.rindex_from text_line (character - 1) '\t'
+      with _ -> 0 in
     let position_start = Position.create ~character:index ~line in
     Range.create ~start:position_start ~end_:pos
 
@@ -127,23 +138,26 @@ let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; 
   let range = range pos doc.textdoc in
   let start_pos = range.start in
   begin match Lsp_document.inspect_at ~position:start_pos doc with
-    | Some Env env -> Some (Cobol_parser.INTERNAL.Grammar.MenhirInterpreter.current_state_number env)
+    | Some Env env -> Some (
+      Cobol_parser.INTERNAL.Grammar.MenhirInterpreter.current_state_number env)
     | _ -> None end
-  |> Option.fold ~none:[completion_item ~range ~kind:CompletionItemKind.Color "Failing state here"] ~some:(fun state_num ->
+  |> Option.fold ~none:[] ~some:(fun state_num ->
       let tokens = Cobol_parser.Expect.next_symbol_of_state state_num in
-      Lsp_io.log_info "Requested with num: %d" state_num;
-    Lsp_io.log_info "List is [%a]\n" (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) tokens;
-    (List.flatten @@ List.map (function
-      | QualifiedRef ->
-          map_to_completion_item
-            ~kind:CompletionItemKind.Variable ~range
-            (qualname_proposals ~filename pos group)
-      | ProcedureRef ->
-          map_to_completion_item
-          ~kind:CompletionItemKind.Module ~range
-          (procedure_proposals ~filename pos group)
-      | K token -> [Cobol_parser.Printer.print_token token |> completion_item ~kind:CompletionItemKind.Keyword ~range])
-    tokens) @ [completion_item ~range ~kind:CompletionItemKind.Color "Empty tokens list here"])
+      (* Lsp_io.log_info "State %d is [%a]\n" state_num (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) tokens; *)
+      List.flatten @@ List.map (function
+        | QualifiedRef ->
+            map_to_completion_item
+              ~kind:CompletionItemKind.Variable ~range
+              (qualname_proposals ~filename pos group)
+        | ProcedureRef ->
+            map_to_completion_item
+            ~kind:CompletionItemKind.Module ~range
+            (procedure_proposals ~filename pos group)
+        | K token ->
+            try let token = Cobol_parser.INTERNAL.show_token token in
+              [completion_item ~kind:CompletionItemKind.Keyword ~range token]
+            with Not_found -> [])
+      tokens)
 
 let completion_items (doc:Lsp_document.t) (pos:Position.t) ast =
   let text = doc.textdoc in
