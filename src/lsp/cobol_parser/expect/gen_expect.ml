@@ -58,7 +58,11 @@ let pp_completion_entry: completion_entry Fmt.t = fun ppf -> function
 
 let terminal_filter_map: terminal -> completion_entry option = fun term ->
   if Terminal.kind term == `REGULAR &&
-  Terminal.attributes term |> List.find_opt (Attribute.has_label "keyword") |> Option.is_some then
+  Terminal.attributes term |>
+  List.exists (fun attrib ->
+    Attribute.has_label "keyword" attrib ||
+    Attribute.has_label "keyword.combined" attrib)
+  then
     Some (K term)
   else None
 

@@ -154,7 +154,8 @@ let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; 
             ~kind:CompletionItemKind.Module ~range
             (procedure_proposals ~filename pos group)
         | K token ->
-            try let token = Cobol_parser.INTERNAL.show_token token in
+            let token' = token &@ Srcloc.dummy in
+            try let token = Pretty.to_string "%a" Cobol_parser.INTERNAL.pp_token token' in
               [completion_item ~kind:CompletionItemKind.Keyword ~range token]
             with Not_found -> [])
       tokens)
