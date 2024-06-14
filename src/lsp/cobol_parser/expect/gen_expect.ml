@@ -38,6 +38,7 @@ include MenhirSdk.Cmly_read.Read (struct let filename = cmlyname end)
 type completion_entry =
   | K of terminal
   | Custom of string
+(* [@@deriving ord] *)
 
 let completion_entry_equal entry1 entry2 =
   match entry1, entry2 with
@@ -47,10 +48,10 @@ let completion_entry_equal entry1 entry2 =
 
 let completion_entry_compare entry1 entry2 =
   match entry1, entry2 with
-    | K t1, K t2 -> Terminal.to_int t1 - Terminal.to_int t2
-    | K _, Custom _ -> 1
-    | Custom _, K _ -> -1
+    | K t1, K t2 -> Terminal.compare t1 t2
     | Custom s1, Custom s2 -> String.compare s2 s1
+    | Custom _, K _ -> -1
+    | K _, Custom _ -> 1
 
 let pp_completion_entry: completion_entry Fmt.t = fun ppf -> function
   | K term -> Fmt.pf ppf "K %a" Print.terminal term
@@ -73,6 +74,7 @@ let nonterminal_filter_map: nonterminal -> completion_entry option = fun nonterm
   fun s -> Option.bind s (fun s -> Some (Custom s))
 
 let completion_type_name = "completion_entry"
+let state_type_name = "state"
 
 let emit_pp_completion_entry ppf custom_types = (* For debug *)
   Fmt.pf ppf "\nlet pp_%s: %s Fmt.t = fun ppf -> function\n"
@@ -80,88 +82,193 @@ let emit_pp_completion_entry ppf custom_types = (* For debug *)
   Fmt.pf ppf "  | K token -> Fmt.pf ppf \"%%s\" @@@@ Grammar_printer.print_token token\n";
   List.iter
   (fun s -> Fmt.pf ppf "  | %s -> Fmt.pf ppf \"%s\"\n" s s)
-  custom_types;
-  Fmt.pf ppf "\n"
+  custom_types
 
 let emit_completion_entry ppf =
   Fmt.pf ppf "type %s =\n" completion_type_name;
-  Fmt.pf ppf "  | K of Grammar_tokens.token\n";
+  Fmt.pf ppf "  | K of token\n";
   let custom_types = Nonterminal.fold (fun nonterm acc ->
     match nonterminal_filter_map nonterm with
     | Some (Custom s) -> (Fmt.pf ppf "  | %s\n" s; s::acc)
     | _ -> acc
   ) [] in
-  Fmt.pf ppf "\n";
   emit_pp_completion_entry ppf custom_types
 
-(* SHOULD BE REMOVED BEFORE MERGE
+let emit_types ppf =
+  Fmt.pf ppf {|
+module type Types = sig
+  type %s = private int
+  val state_to_int: state -> int
+  val state_of_int: int -> state
+end
+
+module Types: Types = struct
+  type state = int
+  let state_to_int state = state
+  let state_of_int state = state
+end
+
+include Types|}
+  state_type_name;
+  Fmt.cut ppf ();
+  Fmt.cut ppf ();
+  (* Fmt.pf ppf "let %s_of_int (state:int): %s = state \n\n" state_type_name state_type_name; *)
+  ()
+
+(* SHOULD BE REMOVED BEFORE MERGE *)
+let emit_firsts ppf =
+  Nonterminal.iter (fun nonterm ->
+    let kind = if Nonterminal.kind nonterm  == `START then "start" else "" in
+    let nullable = if Nonterminal.nullable nonterm then "nullable" else "" in
+    Fmt.(
+      pf ppf "-%a- %s %s\n\t[%a]\n\n"
+      Print.nonterminal nonterm
+      nullable kind
+      (list ~sep:(any ";") Print.terminal) (Nonterminal.first nonterm)))
+
+  (* SHOULD BE REMOVED BEFORE MERGE *)
+let emit_lr0 ppf =
+  Lr1.iter (fun lr1 -> begin
+    let lr0 = Lr1.lr0 lr1 in
+    let items = Lr0.items lr0 in
+    Fmt.pf Fmt.stdout "\nState %d -%d-:\n" (Lr0.to_int lr0) (Lr1.to_int lr1);
+    Print.itemset Fmt.stdout items;
+    let items = List.filter_map (fun (prod,idx) ->
+      let rhs = Production.rhs prod in
+      try let (symbol, _,_) = rhs.(idx) in
+      Some symbol
+      with _ -> None
+      ) items in
+    let sorted = List.sort_uniq Symbol.compare items in
+    (Fmt.list ~sep:(Fmt.any ";") Print.symbol) ppf sorted;
+    if snd @@ List.fold_left (fun acc s ->
+    match acc,s with
+    | (true,_), N _ -> (true,true)
+    | (false,_), N _ -> (true,false)
+    | _ -> acc
+    ) (false,false) sorted then begin
+    (* if List.length sorted < List.length items then begin *)
+      Fmt.string ppf "<-OO->" end;
+  end)
+
+  (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_productions ppf =
   Fmt.pf ppf "(*";
   Lr1.iter (fun lr1 -> begin
-    let keywords = Lr1.reductions lr1 in
-    let keywords2 = List.map fst (Lr1.transitions lr1) in
-    Fmt.pf ppf "  | %d\t ->red [%a]\n"
-    (Lr1.to_int lr1)
-    (Fmt.list ~sep:(Fmt.any ";") (fun ppf (t, pl) ->
-      Fmt.pf ppf "{%a:%a}"
-      Print.terminal t
-      (Fmt.list ~sep:(Fmt.any "--") Print.production)
-      pl)) keywords;
+    let lr0 = Lr1.lr0 lr1 in
+    let items = Lr0.items lr0 in
+    Fmt.pf Fmt.stdout "State %d -%d-: %a" (Lr0.to_int lr0) (Lr1.to_int lr1)
+    (Fmt.option ~none:Fmt.cut Print.production) (Lr1.default_reduction lr1);
+    Print.itemset Fmt.stdout items;
+    let items = List.filter_map (fun (prod,idx) ->
+      try let rhs = Production.rhs prod in
+      let (symbol, _,_) = rhs.(idx) in
+      Some symbol
+    with _ -> None
+      ) items in
+    let from_red = Lr1.reductions lr1 in
+    let from_tra = Lr1.transitions lr1 in
     Fmt.pf ppf "  | %d\t ->tra [%a]\n"
+      (Lr1.to_int lr1)
+      (Fmt.list ~sep:(Fmt.any ";") (fun ppf (s,i) ->
+        Fmt.pf ppf "%a(%d)" Print.symbol s (Lr1.to_int i))) from_tra;
+    Fmt.pf ppf "==> %a\n" (Fmt.list ~sep:(Fmt.any ";") Print.symbol) (List.sort_uniq Symbol.compare items);
+      Fmt.pf ppf "  | %d\t ->red [%a]\n"
     (Lr1.to_int lr1)
-    (Fmt.list ~sep:(Fmt.any ";") Print.symbol) keywords2
-      end);
+    (Fmt.list ~sep:(Fmt.any ";") (fun ppf (t,pl) ->
+      Fmt.pf ppf "%a <> %a" Print.terminal t (Fmt.list Print.production) pl)) from_red;
+    Fmt.string ppf "\n"
+end);
       Fmt.pf ppf "*)\n"
 
 let emit_next_symbol_of_state ppf =
-  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = Grammar_tokens.(function\n" completion_type_name;
+  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = function\n" completion_type_name;
   Lr1.iter (fun lr1 -> begin
     let keywords = List.map fst (Lr1.transitions lr1) in
-      match keywords with
+    match keywords with
         | [] -> Fmt.pf ppf "  | %d\t -> []\n" (Lr1.to_int lr1)
         | lr1transition ->
             Fmt.pf ppf "  | %d\t -> [%a]\n"
             (Lr1.to_int lr1)
             (Fmt.list ~sep:(Fmt.any ";") Print.symbol) lr1transition
-      end);
-      Fmt.pf ppf "  | _ -> [])\n"
+  end);
+      Fmt.pf ppf "  | _ -> []\n"
 
-let emit_next_symbol_of_state_test ppf =
-  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = Grammar_tokens.(function\n" completion_type_name;
+let emit_next_symbol_of_state_test2 ppf = (* taking reduction(if no default) and transitions *)
+  Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_type_name completion_type_name;
   Lr1.iter (fun lr1 -> begin
-    let keywords = List.flatten @@ List.map (fun (s, _) ->
-        match s with
-          (* | T term -> if terminal_keyword_filter term then [term] else [] *)
-          | T term -> [term]
-          | N nonterm -> Nonterminal.first nonterm
+    let comp_entries = List.filter_map (function
+          | T term, _ -> terminal_filter_map term
+          | N nonterm, _ -> nonterminal_filter_map nonterm
     ) (Lr1.transitions lr1) in
-      match keywords with
+    let comp_entries = if Option.is_none @@ Lr1.default_reduction lr1 then
+      List.fold_left (fun acc (t,_) ->
+        (Option.to_list @@ terminal_filter_map t) @ acc
+      ) comp_entries (Lr1.get_reductions lr1)
+    else comp_entries in
+    let uniq_comp_entries = List.sort_uniq completion_entry_compare comp_entries in
+    match uniq_comp_entries with
         | [] -> ()
         | lr1transition ->
             Fmt.pf ppf "  | %d\t -> [%a]\n"
             (Lr1.to_int lr1)
-            (Fmt.list ~sep:(Fmt.any ";") Print.terminal) lr1transition
+            (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) lr1transition
+  end);
+      Fmt.pf ppf "  | _ -> []\n"
+
+let emit_next_symbol_of_state_test ppf = (* Taking items' firsts and following transitions if nullable *)
+  Fmt.pf ppf "\nlet transition_tokens2: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_type_name completion_type_name;
+  let rec get_comp = fun lr1 -> begin
+    let symbols = List.sort_uniq Symbol.compare @@
+      List.filter_map (fun (prod,idx) ->
+        let rhs = Production.rhs prod in
+        try let (symbol, _, _) = rhs.(idx) in Some symbol
+        with _ -> None
+        ) @@ Lr0.items @@ Lr1.lr0 lr1 in
+    let comp_entries = List.flatten @@ List.map (function
+      | T term -> Option.to_list @@ terminal_filter_map term
+      | N nonterm -> begin
+        let firsts = List.filter_map terminal_filter_map @@ Nonterminal.first nonterm in
+        if Nonterminal.nullable nonterm then
+          let tra = Lr1.transitions lr1 in
+          match List.find_map (fun (s,next_lr1) ->
+            if Symbol.equal s (N nonterm) then
+              Some next_lr1 else None) tra with
+                | Some lr1 -> get_comp lr1 @ firsts
+                | None -> firsts
+            else firsts end)
+    symbols in comp_entries end in
+  Lr1.iter (fun lr1 -> begin
+    let comp_entries = get_comp lr1 in
+    let uniq_comp_entries = List.sort_uniq completion_entry_compare comp_entries in
+    match uniq_comp_entries with
+        | [] -> ()
+        | lr1transition ->
+            Fmt.pf ppf "  | %d\t -> [%a]\n"
+            (Lr1.to_int lr1)
+            (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) lr1transition
       end);
-      Fmt.pf ppf "  | _ -> [])\n"
-*)
+      Fmt.pf ppf "  | _ -> []\n"
 
 let emit_next_symbol_of_state_sorted ppf =
-  Fmt.pf ppf "\nlet next_symbol_of_state: int -> _ list \
-    = Grammar_tokens.(function\n";
+  (* Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = function\n" *)
+  (* state_type_name completion_type_name; *)
+  Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n"
+  state_type_name completion_type_name;
   Lr1.fold (fun lr1 acc -> begin
     let comp_entries = List.filter_map (fun (s, _) ->
       match s with
         | T term -> terminal_filter_map term
         | N nonterm -> nonterminal_filter_map nonterm) (Lr1.transitions lr1) in
-    let comp_entries =
-      List.fold_left (fun acc (term, _) ->
-        (Option.to_list @@ terminal_filter_map term) @ acc)
-      comp_entries (Lr1.reductions lr1)
-    in
+    (* let comp_entries = *)
+    (*   List.fold_left (fun acc (term, _) -> *)
+    (*     (Option.to_list @@ terminal_filter_map term) @ acc) *)
+    (*   comp_entries (Lr1.reductions lr1) *)
+    (* in *)
     if comp_entries == []
     then acc
     else let sorted_comp_entries =
-      List.sort_uniq completion_entry_compare comp_entries in
+      List.sort_uniq Stdlib.compare comp_entries in
     (lr1, sorted_comp_entries)::acc
   end) []
         |> (* Finds all state with equal token list and merge them *)
@@ -180,15 +287,24 @@ let emit_next_symbol_of_state_sorted ppf =
     Fmt.(pf ppf "  | %a ->\n    [%a]\n"
             (list ~sep:(any " | ") (using Lr1.to_int int)) states
             (list ~sep:(any ";") pp_completion_entry) tokens));
-  Fmt.pf ppf "  | _ -> [])\n"
+  Fmt.pf ppf "  | _ -> []\n"
 
 let emit ppf =
   Fmt.pf ppf
     "(* Caution: this file was automatically generated from %s; do not edit *)\
-     @\n"
+     @\nopen Grammar_tokens@\n"
     cmlyname;
+    emit_types ppf;
     emit_completion_entry ppf;
-    emit_next_symbol_of_state_sorted ppf
+    (* emit_next_symbol_of_state_sorted ppf; *)
+    (* emit_next_symbol_of_state_test ppf; *)
+    emit_next_symbol_of_state_test2 ppf;
+    (* emit_next_symbol_of_state ppf; *)
+    (* emit_productions ppf; *)
+    (* emit_firsts ppf; *)
+    (* emit_lr0 ppf; *)
+    (* Terminal.iter (fun term -> Print.terminal ppf term; Fmt.string ppf ";") *)
+    ()
 
 let () =
   emit Fmt.stdout

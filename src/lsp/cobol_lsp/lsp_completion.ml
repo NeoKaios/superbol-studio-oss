@@ -16,9 +16,11 @@ open EzCompat
 open Cobol_common                                                  (* Visitor *)
 open Cobol_common.Srcloc.INFIX
 
-open Cobol_parser.Expect
 open Lsp_completion_keywords
 open Lsp.Types
+
+module Menhir = struct include Cobol_parser.INTERNAL.Grammar.MenhirInterpreter end
+module Expect = struct include Cobol_parser.Expect end
 
 let name_proposals ast ~filename pos =
   let visitor = object
@@ -133,32 +135,53 @@ let map_to_completion_item ~kind ~range qualnames =
     | _ -> []) qualnames |>
     List.map @@ completion_item ~kind ~range
 
-let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =
-  let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri doc.textdoc) in
-  let range = range pos doc.textdoc in
-  let start_pos = range.start in
-  begin match Lsp_document.inspect_at ~position:start_pos doc with
-    | Some Env env -> Some (
-      Cobol_parser.INTERNAL.Grammar.MenhirInterpreter.current_state_number env)
-    | _ -> None end
-  |> Option.fold ~none:[] ~some:(fun state_num ->
-      let tokens = Cobol_parser.Expect.next_symbol_of_state state_num in
-      (* Lsp_io.log_info "State %d is [%a]\n" state_num (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) tokens; *)
+let get_completion_items ~(range:Range.t) ~group ~filename comp_entries =
+      let pos = range.end_ in
+      Lsp_io.log_info "State _ is [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries;
       List.flatten @@ List.map (function
-        | QualifiedRef ->
+        | Expect.QualifiedRef ->
             map_to_completion_item
               ~kind:CompletionItemKind.Variable ~range
               (qualname_proposals ~filename pos group)
         | ProcedureRef ->
             map_to_completion_item
             ~kind:CompletionItemKind.Module ~range
-            (procedure_proposals ~filename pos group)
+            (procedure_proposals ~filename range.end_ group)
         | K token ->
             let token' = token &@ Srcloc.dummy in
             try let token = Pretty.to_string "%a" Cobol_parser.INTERNAL.pp_token token' in
               [completion_item ~kind:CompletionItemKind.Keyword ~range token]
             with Not_found -> [])
-      tokens)
+      comp_entries
+
+let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =
+  let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri doc.textdoc) in
+  let range = range pos doc.textdoc in
+  let start_pos = range.start in
+  let rec pop env =
+    let cur = (Menhir.current_state_number env) in
+    let def = (Menhir.env_has_default_reduction env) in
+    match Menhir.pop env with
+        | None -> [(cur,def)]
+        | Some env -> (cur,def)::(pop env) in
+  let f env = begin
+      let has_default_reduction = (Menhir.env_has_default_reduction env) in
+      let state_number = (Menhir.current_state_number env) in
+      if has_default_reduction then []
+      else
+        let comp_entries = Expect.transition_tokens @@ Expect.state_of_int state_number in
+        get_completion_items ~range ~group ~filename comp_entries
+  end in
+
+  begin match Lsp_document.inspect_at ~position:start_pos doc with
+    | Some Env env -> begin
+      Lsp_io.log_info "%a" Fmt.(list ~sep:(any ";") (fun ppf (i,d) ->
+        Fmt.int ppf i;
+        Fmt.bool ppf d
+      )) (pop env);
+       f env
+       end
+    | _ -> [] end
 
 let completion_items (doc:Lsp_document.t) (pos:Position.t) ast =
   let text = doc.textdoc in
