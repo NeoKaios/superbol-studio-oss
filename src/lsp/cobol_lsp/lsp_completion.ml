@@ -137,7 +137,10 @@ let map_to_completion_item ~kind ~range qualnames =
 
 let get_completion_items ~(range:Range.t) ~group ~filename comp_entries =
       let pos = range.end_ in
-      Lsp_io.log_info "State _ is [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries;
+      (* if List.length comp_entries < 10 then *)
+      (*   Lsp_io.log_info "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries *)
+      (* else *)
+      (*   Lsp_io.log_info "====> Comp entries are %d <====\n" (List.length comp_entries); *)
       List.flatten @@ List.map (function
         | Expect.QualifiedRef ->
             map_to_completion_item
@@ -154,32 +157,52 @@ let get_completion_items ~(range:Range.t) ~group ~filename comp_entries =
             with Not_found -> [])
       comp_entries
 
+let listpop l i =
+  let rec inner h t i =
+    if i == 0 then (h, t) else
+    match t with
+    | [] -> (h, [])
+    | hd::tl -> inner (hd::h) tl (i-1)
+  in let h, t = inner [] l i in List.rev h, t
+
 let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =
   let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri doc.textdoc) in
   let range = range pos doc.textdoc in
   let start_pos = range.start in
   let rec pop env =
-    let cur = (Menhir.current_state_number env) in
-    let def = (Menhir.env_has_default_reduction env) in
+    let state = Expect.state_of_int (Menhir.current_state_number env) in
+    let has_default = (Menhir.env_has_default_reduction env) in
     match Menhir.pop env with
-        | None -> [(cur,def)]
-        | Some env -> (cur,def)::(pop env) in
-  let f env = begin
-      let has_default_reduction = (Menhir.env_has_default_reduction env) in
-      let state_number = (Menhir.current_state_number env) in
-      if has_default_reduction then []
-      else
-        let comp_entries = Expect.transition_tokens @@ Expect.state_of_int state_number in
-        get_completion_items ~range ~group ~filename comp_entries
+        | None -> [(state, has_default)]
+        | Some env -> (state, has_default)::(pop env) in
+  let rec f env_l = begin
+      match env_l with
+      | [] -> []
+      | (state, true)::_tl -> begin
+        (* Lsp_io.log_info "Analysing state: %d" (Expect.state_to_int state); *)
+        let rhslen, lhs = Expect.get_default_production state in (* This may need to be a list, imagine lr1 891 but with more cases *)
+        let _, states = listpop env_l rhslen in
+        match states with
+        | [] -> []
+        | (redu_state,_)::_ -> begin
+        (* Lsp_io.log_info "Following in state: %d" (Expect.state_to_int redu_state); *)
+          let next = Expect.follow_transition redu_state lhs in
+          f (next::states)
+        end
+      end
+      | (state, false)::_tl ->
+          (* Lsp_io.log_info "Finally in state: %d" (Expect.state_to_int state); *)
+          let comp_entries = Expect.transition_tokens state in
+          get_completion_items ~range ~group ~filename comp_entries
   end in
 
   begin match Lsp_document.inspect_at ~position:start_pos doc with
     | Some Env env -> begin
-      Lsp_io.log_info "%a" Fmt.(list ~sep:(any ";") (fun ppf (i,d) ->
-        Fmt.int ppf i;
-        Fmt.bool ppf d
-      )) (pop env);
-       f env
+      (* Lsp_io.log_info "%a" Fmt.(list ~sep:(any ";") (fun ppf (i,d) -> *)
+      (*   Fmt.int ppf (Expect.state_to_int i); *)
+      (*   Fmt.bool ppf d *)
+      (* )) (pop env); *)
+       f @@ pop env
        end
     | _ -> [] end
 

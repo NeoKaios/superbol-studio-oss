@@ -73,19 +73,20 @@ let nonterminal_filter_map: nonterminal -> completion_entry option = fun nonterm
   Option.map Attribute.payload |>
   fun s -> Option.bind s (fun s -> Some (Custom s))
 
-let completion_type_name = "completion_entry"
-let state_type_name = "state"
+let completion_entry_t = "completion_entry"
+let state_t = "state"
+let nonterminal_t = "nonterminal"
 
 let emit_pp_completion_entry ppf custom_types = (* For debug *)
   Fmt.pf ppf "\nlet pp_%s: %s Fmt.t = fun ppf -> function\n"
-  completion_type_name completion_type_name;
+  completion_entry_t completion_entry_t;
   Fmt.pf ppf "  | K token -> Fmt.pf ppf \"%%s\" @@@@ Grammar_printer.print_token token\n";
   List.iter
   (fun s -> Fmt.pf ppf "  | %s -> Fmt.pf ppf \"%s\"\n" s s)
   custom_types
 
 let emit_completion_entry ppf =
-  Fmt.pf ppf "type %s =\n" completion_type_name;
+  Fmt.pf ppf "type %s =\n" completion_entry_t;
   Fmt.pf ppf "  | K of token\n";
   let custom_types = Nonterminal.fold (fun nonterm acc ->
     match nonterminal_filter_map nonterm with
@@ -96,24 +97,44 @@ let emit_completion_entry ppf =
 
 let emit_types ppf =
   Fmt.pf ppf {|
-module type Types = sig
+module type TYPES = sig
   type %s = private int
   val state_to_int: state -> int
   val state_of_int: int -> state
+  type %s = private int
+  val nonterminal_to_int: nonterminal -> int
+  val nonterminal_of_int: int -> nonterminal
 end
 
-module Types: Types = struct
+module TYPES: TYPES = struct
   type state = int
   let state_to_int state = state
   let state_of_int state = state
+  type nonterminal = int
+  let nonterminal_to_int nt = nt
+  let nonterminal_of_int nt = nt
 end
 
-include Types|}
-  state_type_name;
+include TYPES|}
+  state_t nonterminal_t;
   Fmt.cut ppf ();
   Fmt.cut ppf ();
   (* Fmt.pf ppf "let %s_of_int (state:int): %s = state \n\n" state_type_name state_type_name; *)
   ()
+
+(** Find all keys that have the same value and merge them into a single key_list entry *)
+let sort_and_merge compare equal l = l |>
+  List.sort (fun (_, value1) (_, value2) ->
+    compare value1 value2)
+        |>
+  List.fold_left (fun acc (key, value) -> begin
+    match acc with
+      | (prev_keys, prev_value)::t
+        when equal value prev_value ->
+          (key::prev_keys, prev_value)::t
+      | _ -> ([key], value)::acc
+  end) []
+
 
 (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_firsts ppf =
@@ -181,8 +202,51 @@ let emit_productions ppf =
 end);
       Fmt.pf ppf "*)\n"
 
+let emit_get_default_production ppf = (* taking reduction(if no default) and transitions *)
+  Fmt.pf ppf "\nlet get_default_production: %s -> int * %s = fun state ->\n  let rhslen, lhs = match state_to_int state with\n" state_t nonterminal_t;
+  Lr1.fold (fun lr1 acc -> begin
+    match Lr1.default_reduction lr1 with
+    | None -> acc
+    | Some prod ->
+        let rhslen = Array.length @@ Production.rhs prod in
+        let lhs = Nonterminal.to_int @@ Production.lhs prod in
+        (Lr1.to_int lr1, (rhslen, lhs))::acc
+  end) [] |>
+  sort_and_merge Stdlib.compare Stdlib.(=) |>
+  List.iter (fun (states,(rhslen, lhs)) ->
+    Fmt.(pf ppf "  | %a -> (%d,%d)\n"
+          (list ~sep:(any " | ") Fmt.int) states
+          rhslen lhs));
+  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state doesn't have any default reduction\") in\n";
+  Fmt.pf ppf "  (rhslen, nonterminal_of_int lhs)\n"
+
+let emit_follow_transition ppf = (* taking reduction(if no default) and transitions *)
+  Fmt.pf ppf "\nlet follow_transition: %s -> %s -> %s * bool = fun state nt ->\n\
+  \  let state = state_to_int state in\n\
+  \  let nt = nonterminal_to_int nt in\n\
+  \  let state, has_default = match state, nt with\n"
+    state_t nonterminal_t state_t;
+  Lr1.fold (fun lr1 acc -> begin
+    List.fold_left (fun acc (symbol, next_state) ->
+      match symbol with
+      | T _ -> acc
+      | N nt -> ((Lr1.to_int lr1, Nonterminal.to_int nt),
+      (Lr1.to_int next_state, Option.is_some @@ Lr1.default_reduction next_state))::acc
+      ) acc (Lr1.transitions lr1)
+  end) [] |>
+  sort_and_merge
+    (fun (i,_) (i2,_) -> i-i2)
+    (fun next prev -> fst next == fst prev && snd next == snd prev)
+      |>
+  List.iter (fun (state_nt, (next_state, has_default)) ->
+    Fmt.(pf ppf "  | %a -> (%d,%b)\n"
+          (list ~sep:(any " | ") (fun ppf (s,nt) -> Fmt.pf ppf "(%d,%d)" s nt)) state_nt
+          next_state has_default));
+  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\") in\n";
+  Fmt.pf ppf "  (state_of_int state, has_default)\n"
+
 let emit_next_symbol_of_state ppf =
-  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = function\n" completion_type_name;
+  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = function\n" completion_entry_t;
   Lr1.iter (fun lr1 -> begin
     let keywords = List.map fst (Lr1.transitions lr1) in
     match keywords with
@@ -194,30 +258,33 @@ let emit_next_symbol_of_state ppf =
   end);
       Fmt.pf ppf "  | _ -> []\n"
 
-let emit_next_symbol_of_state_test2 ppf = (* taking reduction(if no default) and transitions *)
-  Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_type_name completion_type_name;
-  Lr1.iter (fun lr1 -> begin
+let emit_transition_tokens ppf = (* taking reduction(if no default) and transitions *)
+  Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_t completion_entry_t;
+  Lr1.fold (fun lr1 acc -> begin
     let comp_entries = List.filter_map (function
-          | T term, _ -> terminal_filter_map term
+      | T term, _ -> terminal_filter_map term
           | N nonterm, _ -> nonterminal_filter_map nonterm
     ) (Lr1.transitions lr1) in
     let comp_entries = if Option.is_none @@ Lr1.default_reduction lr1 then
       List.fold_left (fun acc (t,_) ->
         (Option.to_list @@ terminal_filter_map t) @ acc
-      ) comp_entries (Lr1.get_reductions lr1)
+        ) comp_entries (Lr1.get_reductions lr1)
     else comp_entries in
-    let uniq_comp_entries = List.sort_uniq completion_entry_compare comp_entries in
-    match uniq_comp_entries with
-        | [] -> ()
-        | lr1transition ->
-            Fmt.pf ppf "  | %d\t -> [%a]\n"
-            (Lr1.to_int lr1)
-            (Fmt.list ~sep:(Fmt.any ";") pp_completion_entry) lr1transition
-  end);
-      Fmt.pf ppf "  | _ -> []\n"
+    if comp_entries == [] then acc
+    else (lr1, List.sort_uniq completion_entry_compare comp_entries)::acc
+  end) [] |>
+  sort_and_merge
+    (List.compare completion_entry_compare)
+    (List.equal completion_entry_equal)
+          |>
+  List.iter (fun (states, comp_entries) ->
+    Fmt.(pf ppf "  | %a ->\n    [%a]\n"
+            (list ~sep:(any " | ") (using Lr1.to_int int)) states
+            (list ~sep:(any ";") pp_completion_entry) comp_entries));
+  Fmt.pf ppf "  | _ -> []\n"
 
 let emit_next_symbol_of_state_test ppf = (* Taking items' firsts and following transitions if nullable *)
-  Fmt.pf ppf "\nlet transition_tokens2: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_type_name completion_type_name;
+  Fmt.pf ppf "\nlet transition_tokens2: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_t completion_entry_t;
   let rec get_comp = fun lr1 -> begin
     let symbols = List.sort_uniq Symbol.compare @@
       List.filter_map (fun (prod,idx) ->
@@ -254,7 +321,7 @@ let emit_next_symbol_of_state_sorted ppf =
   (* Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = function\n" *)
   (* state_type_name completion_type_name; *)
   Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n"
-  state_type_name completion_type_name;
+  state_t completion_entry_t;
   Lr1.fold (fun lr1 acc -> begin
     let comp_entries = List.filter_map (fun (s, _) ->
       match s with
@@ -296,9 +363,11 @@ let emit ppf =
     cmlyname;
     emit_types ppf;
     emit_completion_entry ppf;
+    emit_get_default_production ppf;
+    emit_follow_transition ppf;
     (* emit_next_symbol_of_state_sorted ppf; *)
     (* emit_next_symbol_of_state_test ppf; *)
-    emit_next_symbol_of_state_test2 ppf;
+    emit_transition_tokens ppf;
     (* emit_next_symbol_of_state ppf; *)
     (* emit_productions ppf; *)
     (* emit_firsts ppf; *)
