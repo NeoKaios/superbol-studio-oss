@@ -127,7 +127,7 @@ let range (pos:Position.t) text =
     let position_start = Position.create ~character:index ~line in
     Range.create ~start:position_start ~end_:pos
 
-let map_to_completion_item ~kind ~range qualnames =
+let to_completion_item ~kind ~range qualnames =
   List.flatten @@ List.map (function
     | Cobol_ptree.Name name -> [~&name]
     | Qual (name,_) as qualname ->
@@ -135,19 +135,19 @@ let map_to_completion_item ~kind ~range qualnames =
     | _ -> []) qualnames |>
     List.map @@ completion_item ~kind ~range
 
-let get_completion_items ~(range:Range.t) ~group ~filename comp_entries =
+let map_completion_items ~(range:Range.t) ~group ~filename comp_entries =
       let pos = range.end_ in
       if List.length comp_entries < 10 then
-        Lsp_io.log_info "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
+        Lsp_io.log_debug "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
       else
-        Lsp_io.log_info "====> Comp entries are %d <====\n" (List.length comp_entries);
+        Lsp_io.log_debug "====> Comp entries are %d <====\n" (List.length comp_entries);
       List.flatten @@ List.map (function
         | Expect.QualifiedRef ->
-            map_to_completion_item
+            to_completion_item
               ~kind:CompletionItemKind.Variable ~range
               (qualname_proposals ~filename pos group)
         | ProcedureRef ->
-            map_to_completion_item
+            to_completion_item
             ~kind:CompletionItemKind.Module ~range
             (procedure_proposals ~filename range.end_ group)
         | K token ->
@@ -165,57 +165,47 @@ let listpop l i =
     | hd::tl -> inner (hd::h) tl (i-1)
   in let h, t = inner [] l i in List.rev h, t
 
+let pp_state ppf state = (* for debug *)
+  let has_default = try let _ = Expect.get_default_nonterminal_produced state in true with _ -> false in
+  Fmt.pf ppf "%d%s" (Expect.state_to_int state) (if has_default then "_" else "")
+
+let expected_tokens env =
+  let rec get_stack env =
+    let state = Expect.state_of_int (Menhir.current_state_number env) in
+    let has_default = try let _ = Expect.get_default_nonterminal_produced state in true with _ -> false in
+    match Menhir.pop env with
+        | None -> [(state, has_default)]
+        | Some env -> (state, has_default)::(get_stack env) in
+  let rec inner env_stack acc =
+    match env_stack with
+      | [] -> []
+      | (state, false)::_tl ->
+          Lsp_io.log_debug "State without default: %a" pp_state state;
+          Expect.transition_tokens state @ acc
+      | (state, true)::_tl ->
+          Lsp_io.log_debug "State with default: %a" pp_state state;
+          let acc = Expect.transition_tokens state @ acc in
+          let defaults = Expect.get_default_nonterminal_produced state in
+          List.fold_left (fun acc (rhslen, lhs) ->
+            let _, states = listpop env_stack rhslen in
+            match List.hd states with
+              | (transition_state, _) ->
+                  let next = Expect.follow_transition transition_state lhs in
+                  Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state (fst next);
+                  inner (next::states) acc
+              | exception Failure _ ->
+                  Lsp_io.log_warn "Had to pop too many states during context completion [%a]"
+                  (Fmt.list ~sep:(Fmt.any " ") Fmt.int)
+                  (List.map (fun (s, _) -> Expect.state_to_int s) env_stack);
+                  acc)
+          acc defaults in
+  Lsp_io.log_debug "%a" Fmt.(list ~sep:(any " ") (fun ppf (i,d) ->
+    Fmt.pf ppf "%d%s" (Expect.state_to_int i) (if d then "T" else ""))) (get_stack env);
+  inner (get_stack env) []
+
 let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =
   let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri doc.textdoc) in
   let range = range pos doc.textdoc in
-  let start_pos = range.start in
-  let rec pop env =
-    let state = Expect.state_of_int (Menhir.current_state_number env) in
-    let has_default = (Menhir.env_has_default_reduction env) in
-    match Menhir.pop env with
-        | None -> [(state, has_default)]
-        | Some env -> (state, has_default)::(pop env) in
-  let f env_l = begin
-    let rec inner env_l acc =
-      match env_l with
-      | [] -> []
-      | (state, true)::_tl -> begin
-        Lsp_io.log_info "State with default: %d" (Expect.state_to_int state);
-        let acc = Expect.transition_tokens state @ acc in
-        let rhslen, lhs = Expect.get_default_production state in (* This may need to be a list, imagine lr1 891 but with more cases *)
-        let _, states = listpop env_l rhslen in
-        match states with
-        | [] -> acc
-        | (redu_state,_)::_ -> begin
-          let next = Expect.follow_transition redu_state lhs in
-          Lsp_io.log_info "Following %d -> %d" (Expect.state_to_int redu_state) (Expect.state_to_int @@ fst next);
-          inner (next::states) acc
-        end
-      end
-      | (state, false)::_tl ->
-          Lsp_io.log_info "State without default: %d" (Expect.state_to_int state);
-          Expect.transition_tokens state @ acc
-    in
-    let comp_entries = inner env_l [] in
-    get_completion_items ~range ~group ~filename comp_entries
-
-  end in
-
-  begin match Lsp_document.inspect_at ~position:start_pos doc with
-    | Some Env env -> begin
-      Lsp_io.log_info "%a" Fmt.(list ~sep:(any " ") (fun ppf (i,d) ->
-        Fmt.pf ppf "%d%s" (Expect.state_to_int i) (if d then "T" else "")
-      )) (pop env);
-       f @@ pop env
-       end
+  begin match Lsp_document.inspect_at ~position:(range.start) doc with
+    | Some Env env -> map_completion_items ~range ~group ~filename (expected_tokens env)
     | _ -> [] end
-
-let completion_items (doc:Lsp_document.t) (pos:Position.t) ast =
-  let text = doc.textdoc in
-  let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri text) in
-  let range = range pos text in
-  let names = name_proposals ast ~filename pos in
-  let keywords = keyword_proposals ast pos in
-  let keywordsItem = List.map (completion_item ~kind:CompletionItemKind.Keyword ~range) keywords in
-  let namesItem = List.map (completion_item ~kind:CompletionItemKind.Method ~range) names in
-    keywordsItem @ namesItem
