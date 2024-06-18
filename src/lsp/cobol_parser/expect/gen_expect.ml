@@ -202,12 +202,28 @@ let emit_productions ppf =
 end);
       Fmt.pf ppf "*)\n"
 
+let reducable_productions lr1: production list=
+  match Lr1.default_reduction lr1 with
+  | Some prod -> [prod]
+  | None -> begin
+    let lr0 = Lr1.lr0 lr1 in
+    List.fold_left (fun acc (prod, idx) ->
+        let rhs = Production.rhs prod in
+        if Array.length rhs == idx then prod::acc else acc)
+    [] (Lr0.items lr0)
+  end
+
+let has_reducable_productions lr1: bool =
+  match reducable_productions lr1 with
+  | [] -> false
+  | _ -> true
+
 let emit_get_default_production ppf = (* taking reduction(if no default) and transitions *)
   Fmt.pf ppf "\nlet get_default_production: %s -> int * %s = fun state ->\n  let rhslen, lhs = match state_to_int state with\n" state_t nonterminal_t;
   Lr1.fold (fun lr1 acc -> begin
-    match Lr1.default_reduction lr1 with
-    | None -> acc
-    | Some prod ->
+    match reducable_productions lr1 with
+    | [] -> acc
+    | prod::_ ->
         let rhslen = Array.length @@ Production.rhs prod in
         let lhs = Nonterminal.to_int @@ Production.lhs prod in
         (Lr1.to_int lr1, (rhslen, lhs))::acc
@@ -231,7 +247,7 @@ let emit_follow_transition ppf = (* taking reduction(if no default) and transiti
       match symbol with
       | T _ -> acc
       | N nt -> ((Lr1.to_int lr1, Nonterminal.to_int nt),
-      (Lr1.to_int next_state, Option.is_some @@ Lr1.default_reduction next_state))::acc
+      (Lr1.to_int next_state, has_reducable_productions next_state))::acc
       ) acc (Lr1.transitions lr1)
   end) [] |>
   sort_and_merge
@@ -245,31 +261,18 @@ let emit_follow_transition ppf = (* taking reduction(if no default) and transiti
   Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\") in\n";
   Fmt.pf ppf "  (state_of_int state, has_default)\n"
 
-let emit_next_symbol_of_state ppf =
-  Fmt.pf ppf "\nlet next_symbol_of_state: int -> %s list = function\n" completion_entry_t;
-  Lr1.iter (fun lr1 -> begin
-    let keywords = List.map fst (Lr1.transitions lr1) in
-    match keywords with
-        | [] -> Fmt.pf ppf "  | %d\t -> []\n" (Lr1.to_int lr1)
-        | lr1transition ->
-            Fmt.pf ppf "  | %d\t -> [%a]\n"
-            (Lr1.to_int lr1)
-            (Fmt.list ~sep:(Fmt.any ";") Print.symbol) lr1transition
-  end);
-      Fmt.pf ppf "  | _ -> []\n"
-
 let emit_transition_tokens ppf = (* taking reduction(if no default) and transitions *)
   Fmt.pf ppf "\nlet transition_tokens: %s -> %s list = fun state ->\n  match state_to_int state with\n" state_t completion_entry_t;
   Lr1.fold (fun lr1 acc -> begin
     let comp_entries = List.filter_map (function
       | T term, _ -> terminal_filter_map term
-          | N nonterm, _ -> nonterminal_filter_map nonterm
+      | N nonterm, _ -> nonterminal_filter_map nonterm
     ) (Lr1.transitions lr1) in
-    let comp_entries = if Option.is_none @@ Lr1.default_reduction lr1 then
+    let comp_entries = if not @@ has_reducable_productions lr1 then
       List.fold_left (fun acc (t,_) ->
         (Option.to_list @@ terminal_filter_map t) @ acc
         ) comp_entries (Lr1.get_reductions lr1)
-    else comp_entries in
+        else comp_entries in
     if comp_entries == [] then acc
     else (lr1, List.sort_uniq completion_entry_compare comp_entries)::acc
   end) [] |>

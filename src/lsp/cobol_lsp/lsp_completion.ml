@@ -137,10 +137,10 @@ let map_to_completion_item ~kind ~range qualnames =
 
 let get_completion_items ~(range:Range.t) ~group ~filename comp_entries =
       let pos = range.end_ in
-      (* if List.length comp_entries < 10 then *)
-      (*   Lsp_io.log_info "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries *)
-      (* else *)
-      (*   Lsp_io.log_info "====> Comp entries are %d <====\n" (List.length comp_entries); *)
+      if List.length comp_entries < 10 then
+        Lsp_io.log_info "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
+      else
+        Lsp_io.log_info "====> Comp entries are %d <====\n" (List.length comp_entries);
       List.flatten @@ List.map (function
         | Expect.QualifiedRef ->
             map_to_completion_item
@@ -175,33 +175,37 @@ let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; 
     match Menhir.pop env with
         | None -> [(state, has_default)]
         | Some env -> (state, has_default)::(pop env) in
-  let rec f env_l = begin
+  let f env_l = begin
+    let rec inner env_l acc =
       match env_l with
       | [] -> []
       | (state, true)::_tl -> begin
-        (* Lsp_io.log_info "Analysing state: %d" (Expect.state_to_int state); *)
+        Lsp_io.log_info "State with default: %d" (Expect.state_to_int state);
+        let acc = Expect.transition_tokens state @ acc in
         let rhslen, lhs = Expect.get_default_production state in (* This may need to be a list, imagine lr1 891 but with more cases *)
         let _, states = listpop env_l rhslen in
         match states with
-        | [] -> []
+        | [] -> acc
         | (redu_state,_)::_ -> begin
-        (* Lsp_io.log_info "Following in state: %d" (Expect.state_to_int redu_state); *)
           let next = Expect.follow_transition redu_state lhs in
-          f (next::states)
+          Lsp_io.log_info "Following %d -> %d" (Expect.state_to_int redu_state) (Expect.state_to_int @@ fst next);
+          inner (next::states) acc
         end
       end
       | (state, false)::_tl ->
-          (* Lsp_io.log_info "Finally in state: %d" (Expect.state_to_int state); *)
-          let comp_entries = Expect.transition_tokens state in
-          get_completion_items ~range ~group ~filename comp_entries
+          Lsp_io.log_info "State without default: %d" (Expect.state_to_int state);
+          Expect.transition_tokens state @ acc
+    in
+    let comp_entries = inner env_l [] in
+    get_completion_items ~range ~group ~filename comp_entries
+
   end in
 
   begin match Lsp_document.inspect_at ~position:start_pos doc with
     | Some Env env -> begin
-      (* Lsp_io.log_info "%a" Fmt.(list ~sep:(any ";") (fun ppf (i,d) -> *)
-      (*   Fmt.int ppf (Expect.state_to_int i); *)
-      (*   Fmt.bool ppf d *)
-      (* )) (pop env); *)
+      Lsp_io.log_info "%a" Fmt.(list ~sep:(any " ") (fun ppf (i,d) ->
+        Fmt.pf ppf "%d%s" (Expect.state_to_int i) (if d then "T" else "")
+      )) (pop env);
        f @@ pop env
        end
     | _ -> [] end
