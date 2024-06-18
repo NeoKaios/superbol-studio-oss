@@ -219,13 +219,15 @@ let has_reducable_productions lr1: bool =
   | _ -> true
 
 let emit_get_default_nonterminal_produced ppf =
-  Fmt.pf ppf "\n(** For a given state, compute the list of every nonterminal that can be produced
-  \  without consuming the input.
-  \n  @return (length of production, nonterminal produced) list
-  \n  @raise Invalid_argument if the state has no default *)
-  let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->\n\
-  \  List.map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs))\n\
-  \  begin match state_to_int state with\n" state_t nonterminal_t;
+  Fmt.pf ppf {|
+(** For a given state, compute the list of every nonterminal that can be produced
+  without consuming the input.
+  @return (length of production, nonterminal produced) list
+  @raise Invalid_argument if the state has no default *)
+let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->
+  List.map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs))
+  begin match state_to_int state with
+|} state_t nonterminal_t;
   Lr1.fold (fun lr1 acc -> begin
     match reducable_productions lr1 with
     | [] -> acc
@@ -246,37 +248,37 @@ let emit_get_default_nonterminal_produced ppf =
   Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state doesn't have any default production\") end\n"
 
 let emit_follow_transition ppf = (* taking reduction (if no default) and transitions *)
-  Fmt.pf ppf "\n(** For a given state and nonterminal,
-  \  returns the state the automaton will be in after taking the transition *)
-  let follow_transition: %s -> %s -> %s * bool = fun state nt ->\n\
-  \  let state = state_to_int state in\n\
-  \  let nt = nonterminal_to_int nt in\n\
-  \  let state, has_default = match state, nt with\n"
-    state_t nonterminal_t state_t;
+  Fmt.pf ppf {|
+(** For a given state and nonterminal,
+  returns the state the automaton will be in after taking the transition *)
+let follow_transition: %s -> %s -> %s = fun state nt ->
+  let state = state_to_int state in
+  let nt = nonterminal_to_int nt in
+  state_of_int @@@@ match state, nt with
+|} state_t nonterminal_t state_t;
   Lr1.fold (fun lr1 acc -> begin
     List.fold_left (fun acc (symbol, next_state) ->
       match symbol with
       | T _ -> acc
       | N nt -> ((Lr1.to_int lr1, Nonterminal.to_int nt),
-      (Lr1.to_int next_state, has_reducable_productions next_state))::acc
+          Lr1.to_int next_state)::acc
       ) acc (Lr1.transitions lr1)
   end) [] |>
-  sort_and_merge
-    (fun (i,_) (i2,_) -> i-i2)
-    (fun next prev -> fst next == fst prev && snd next == snd prev)
+  sort_and_merge Int.compare Int.equal
       |>
-  List.iter (fun (state_nt, (next_state, has_default)) ->
-    Fmt.(pf ppf "  | %a -> (%d,%b)\n"
+  List.iter (fun (state_nt, next_state) ->
+    Fmt.(pf ppf "  | %a -> %d\n"
           (list ~sep:(any " | ") (fun ppf (s, nt) -> Fmt.pf ppf "(%d,%d)" s nt)) state_nt
-          next_state has_default));
-  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\") in\n";
-  Fmt.pf ppf "  (state_of_int state, has_default)\n"
+          next_state));
+  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\")\n"
 
 let emit_transition_tokens ppf = (* taking reduction(if no default) and transitions *)
-  Fmt.pf ppf "(** A list of the possible tokens accepted by the \
-  automaton in the given state *)\
-  \nlet transition_tokens: %s -> %s list = fun state ->\n\
-  \  match state_to_int state with\n" state_t completion_entry_t;
+  Fmt.pf ppf {|
+(** A list of the possible tokens accepted by the
+  automaton in the given state *)
+let transition_tokens: %s -> %s list = fun state ->
+  match state_to_int state with
+|} state_t completion_entry_t;
   Lr1.fold (fun lr1 acc -> begin
     let comp_entries = List.filter_map (function
       | T term, _ -> terminal_filter_map term

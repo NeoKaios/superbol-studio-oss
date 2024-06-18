@@ -137,10 +137,6 @@ let to_completion_item ~kind ~range qualnames =
 
 let map_completion_items ~(range:Range.t) ~group ~filename comp_entries =
       let pos = range.end_ in
-      if List.length comp_entries < 10 then
-        Lsp_io.log_debug "Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
-      else
-        Lsp_io.log_debug "====> Comp entries are %d <====\n" (List.length comp_entries);
       List.flatten @@ List.map (function
         | Expect.QualifiedRef ->
             to_completion_item
@@ -172,36 +168,34 @@ let pp_state ppf state = (* for debug *)
 let expected_tokens env =
   let rec get_stack env =
     let state = Expect.state_of_int (Menhir.current_state_number env) in
-    let has_default = try let _ = Expect.get_default_nonterminal_produced state in true with _ -> false in
     match Menhir.pop env with
-        | None -> [(state, has_default)]
-        | Some env -> (state, has_default)::(get_stack env) in
+        | None -> [state]
+        | Some env -> state::(get_stack env) in
   let rec inner env_stack acc =
     match env_stack with
       | [] -> []
-      | (state, false)::_tl ->
-          Lsp_io.log_debug "State without default: %a" pp_state state;
-          Expect.transition_tokens state @ acc
-      | (state, true)::_tl ->
-          Lsp_io.log_debug "State with default: %a" pp_state state;
+      | state::_ ->
+          Lsp_io.log_debug "In State: %a" pp_state state;
+          let defaults = try Expect.get_default_nonterminal_produced state with _ -> [] in
           let acc = Expect.transition_tokens state @ acc in
-          let defaults = Expect.get_default_nonterminal_produced state in
           List.fold_left (fun acc (rhslen, lhs) ->
             let _, states = listpop env_stack rhslen in
             match List.hd states with
-              | (transition_state, _) ->
+              | transition_state ->
                   let next = Expect.follow_transition transition_state lhs in
-                  Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state (fst next);
+                  Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state next;
                   inner (next::states) acc
               | exception Failure _ ->
                   Lsp_io.log_warn "Had to pop too many states during context completion [%a]"
                   (Fmt.list ~sep:(Fmt.any " ") Fmt.int)
-                  (List.map (fun (s, _) -> Expect.state_to_int s) env_stack);
+                  (List.map Expect.state_to_int env_stack);
                   acc)
           acc defaults in
-  Lsp_io.log_debug "%a" Fmt.(list ~sep:(any " ") (fun ppf (i,d) ->
-    Fmt.pf ppf "%d%s" (Expect.state_to_int i) (if d then "T" else ""))) (get_stack env);
-  inner (get_stack env) []
+  Lsp_io.log_debug "%a" (Fmt.list ~sep:(Fmt.any " ") pp_state) (get_stack env);
+  let comp_entries = inner (get_stack env) [] in
+  if List.length comp_entries < 10 then Lsp_io.log_debug "=> Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
+  else Lsp_io.log_debug "=> Comp entries are %d\n" (List.length comp_entries);
+  comp_entries
 
 let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =
   let filename = Lsp.Uri.to_path (Lsp.Text_document.documentUri doc.textdoc) in
