@@ -107,6 +107,7 @@ let completion_item label ~range ~kind =
       ~textEdit:(`TextEdit textedit)
       ()
 
+let delimiters = [' '; '\t'; '.']
 let range (pos:Position.t) text =
   let { line; character }: Position.t = pos in
   let get_nthline s n =
@@ -120,10 +121,11 @@ let range (pos:Position.t) text =
       String.sub s start (end_-start)
       in
     let text_line = get_nthline (Lsp.Text_document.text text) line in
-    let index =
-      try 1 + String.rindex_from text_line (character - 1) ' ' with _ ->
-      try 1 + String.rindex_from text_line (character - 1) '\t'
-      with _ -> 0 in
+    let index = List.fold_left (fun acc delimiter ->
+      let current =
+        try 1 + String.rindex_from text_line (character - 1) delimiter
+        with _ -> 0 in
+      max acc current) 0 delimiters in
     let position_start = Position.create ~character:index ~line in
     Range.create ~start:position_start ~end_:pos
 
