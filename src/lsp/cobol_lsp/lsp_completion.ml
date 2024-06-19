@@ -153,6 +153,8 @@ let map_completion_items ~(range:Range.t) ~group ~filename comp_entries =
             with Not_found -> [])
       comp_entries
 
+(** [listpop l i] pops [i] elements of the list [l]
+    @return (h, t) where h is the list of popped element, t is the tail of the list *)
 let listpop l i =
   let rec inner h t i =
     if i == 0 then (h, t) else
@@ -165,6 +167,12 @@ let pp_state ppf state = (* for debug *)
   let has_default = try let _ = Expect.get_default_nonterminal_produced state in true with _ -> false in
   Fmt.pf ppf "%d%s" (Expect.state_to_int state) (if has_default then "_" else "")
 
+let ce_compare ce1 ce2 =
+  String.compare
+  (Fmt.str "%a" Expect.pp_completion_entry ce1)
+  (Fmt.str "%a" Expect.pp_completion_entry ce2)
+
+let debug = false
 let expected_tokens env =
   let rec get_stack env =
     let state = Expect.state_of_int (Menhir.current_state_number env) in
@@ -175,7 +183,7 @@ let expected_tokens env =
     match env_stack with
       | [] -> []
       | state::_ ->
-          Lsp_io.log_debug "In State: %a" pp_state state;
+          if debug then (Lsp_io.log_debug "In State: %a" pp_state state; let tok = Expect.transition_tokens state in if List.length tok > 0 then Lsp_io.log_debug "Gained %d entries [%a]" (List.length tok) Fmt.(list ~sep:(any ";") Expect.pp_completion_entry) tok);
           let defaults = try Expect.get_default_nonterminal_produced state with _ -> [] in
           let acc = Expect.transition_tokens state @ acc in
           List.fold_left (fun acc (rhslen, lhs) ->
@@ -183,7 +191,7 @@ let expected_tokens env =
             match List.hd states with
               | transition_state ->
                   let next = Expect.follow_transition transition_state lhs in
-                  Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state next;
+                  if debug then Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state next;
                   inner (next::states) acc
               | exception Failure _ ->
                   Lsp_io.log_warn "Had to pop too many states during context completion [%a]"
@@ -191,10 +199,10 @@ let expected_tokens env =
                   (List.map Expect.state_to_int env_stack);
                   acc)
           acc defaults in
-  Lsp_io.log_debug "%a" (Fmt.list ~sep:(Fmt.any " ") pp_state) (get_stack env);
+  if debug then Lsp_io.log_debug "%a" (Fmt.list ~sep:(Fmt.any " ") pp_state) (get_stack env);
   let comp_entries = inner (get_stack env) [] in
-  if List.length comp_entries < 10 then Lsp_io.log_debug "=> Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries
-  else Lsp_io.log_debug "=> Comp entries are %d\n" (List.length comp_entries);
+  let comp_entries = List.sort_uniq ce_compare comp_entries in
+  if debug then (if List.length comp_entries < 10 then Lsp_io.log_debug "=> Comp entries are [%a]\n" (Fmt.list ~sep:(Fmt.any ";") Expect.pp_completion_entry) comp_entries else Lsp_io.log_debug "=> Comp entries are %d\n" (List.length comp_entries));
   comp_entries
 
 let context_completion_items (doc:Lsp_document.t) Cobol_typeck.Outputs.{ group; _ } (pos:Position.t) =

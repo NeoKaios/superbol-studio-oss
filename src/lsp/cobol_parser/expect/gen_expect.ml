@@ -48,7 +48,7 @@ let completion_entry_equal entry1 entry2 =
 
 let completion_entry_compare entry1 entry2 =
   match entry1, entry2 with
-    | K t1, K t2 -> Terminal.compare t1 t2
+    | K t1, K t2 -> Terminal.compare t2 t1
     | Custom s1, Custom s2 -> String.compare s2 s1
     | Custom _, K _ -> -1
     | K _, Custom _ -> 1
@@ -172,51 +172,65 @@ let emit_lr0 ppf =
       Fmt.string ppf "<-OO->" end;
   end)
 
+let default_nonterminals lr1 =
+  List.sort_uniq Stdlib.compare @@
+  match Lr1.default_reduction lr1 with
+  | Some prod -> [(Array.length @@ Production.rhs prod, Nonterminal.to_int @@ Production.lhs prod)]
+  | None -> begin
+    let lr0 = Lr1.lr0 lr1 in
+    List.fold_left (fun acc (prod, idx) ->
+      let rhs = Production.rhs prod in
+      if Array.length rhs == idx
+      then (Array.length @@ Production.rhs prod, Nonterminal.to_int @@ Production.lhs prod)::acc
+      else match rhs.(idx) with
+      | N nt, _, _ when Nonterminal.nullable nt -> (0, Nonterminal.to_int nt)::acc
+      | _ -> acc
+      | exception _ -> acc)
+    [] (Lr0.items lr0) end
+
+let has_reducable_productions lr1: bool =
+  (* SHOULD BE REMOVED BEFORE MERGE *)
+  match default_nonterminals lr1 with
+  | [] -> false
+  | _ -> true
+
   (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_productions ppf =
   Fmt.pf ppf "(*";
   Lr1.iter (fun lr1 -> begin
+    if not @@ has_reducable_productions lr1 then () else
     let lr0 = Lr1.lr0 lr1 in
     let items = Lr0.items lr0 in
+    if not @@ List.fold_left (fun acc (prod,idx) ->
+      let rhs = Production.rhs prod in
+      match rhs.(idx) with
+      | T _,_,_ -> acc
+      | N nt,_,_ -> Nonterminal.nullable nt || acc
+      | exception _ -> acc
+    ) false items then () else (
     Fmt.pf Fmt.stdout "State %d -%d-: %a" (Lr0.to_int lr0) (Lr1.to_int lr1)
     (Fmt.option ~none:Fmt.cut Print.production) (Lr1.default_reduction lr1);
     Print.itemset Fmt.stdout items;
-    let items = List.filter_map (fun (prod,idx) ->
-      try let rhs = Production.rhs prod in
-      let (symbol, _,_) = rhs.(idx) in
-      Some symbol
-    with _ -> None
-      ) items in
-    let from_red = Lr1.reductions lr1 in
-    let from_tra = Lr1.transitions lr1 in
-    Fmt.pf ppf "  | %d\t ->tra [%a]\n"
-      (Lr1.to_int lr1)
-      (Fmt.list ~sep:(Fmt.any ";") (fun ppf (s,i) ->
-        Fmt.pf ppf "%a(%d)" Print.symbol s (Lr1.to_int i))) from_tra;
-    Fmt.pf ppf "==> %a\n" (Fmt.list ~sep:(Fmt.any ";") Print.symbol) (List.sort_uniq Symbol.compare items);
-      Fmt.pf ppf "  | %d\t ->red [%a]\n"
-    (Lr1.to_int lr1)
-    (Fmt.list ~sep:(Fmt.any ";") (fun ppf (t,pl) ->
-      Fmt.pf ppf "%a <> %a" Print.terminal t (Fmt.list Print.production) pl)) from_red;
-    Fmt.string ppf "\n"
+    Fmt.string ppf "\n")
+    (* let items = List.filter_map (fun (prod,idx) -> *)
+    (*   try let rhs = Production.rhs prod in *)
+    (*   let (symbol, _,_) = rhs.(idx) in *)
+    (*   Some symbol *)
+    (* with _ -> None *)
+    (*   ) items in *)
+    (* let from_red = Lr1.reductions lr1 in *)
+    (* let from_tra = Lr1.transitions lr1 in *)
+    (* Fmt.pf ppf "  | %d\t ->tra [%a]\n" *)
+    (*   (Lr1.to_int lr1) *)
+    (*   (Fmt.list ~sep:(Fmt.any ";") (fun ppf (s,i) -> *)
+    (*     Fmt.pf ppf "%a(%d)" Print.symbol s (Lr1.to_int i))) from_tra; *)
+    (* Fmt.pf ppf "==> %a\n" (Fmt.list ~sep:(Fmt.any ";") Print.symbol) (List.sort_uniq Symbol.compare items); *)
+    (*   Fmt.pf ppf "  | %d\t ->red [%a]\n" *)
+    (* (Lr1.to_int lr1) *)
+    (* (Fmt.list ~sep:(Fmt.any ";") (fun ppf (t,pl) -> *)
+    (*   Fmt.pf ppf "%a <> %a" Print.terminal t (Fmt.list Print.production) pl)) from_red; *)
 end);
       Fmt.pf ppf "*)\n"
-
-let reducable_productions lr1: production list=
-  match Lr1.default_reduction lr1 with
-  | Some prod -> [prod]
-  | None -> begin
-    let lr0 = Lr1.lr0 lr1 in
-    List.fold_left (fun acc (prod, idx) ->
-        let rhs = Production.rhs prod in
-        if Array.length rhs == idx then prod::acc else acc)
-    [] (Lr0.items lr0)
-  end
-
-let has_reducable_productions lr1: bool =
-  match reducable_productions lr1 with
-  | [] -> false
-  | _ -> true
 
 let emit_get_default_nonterminal_produced ppf =
   Fmt.pf ppf {|
@@ -229,15 +243,9 @@ let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->
   begin match state_to_int state with
 |} state_t nonterminal_t;
   Lr1.fold (fun lr1 acc -> begin
-    match reducable_productions lr1 with
+    match default_nonterminals lr1 with
     | [] -> acc
-    | prods ->
-        let mapped = List.sort Stdlib.compare @@ List.map (fun prod ->
-          let rhslen = Array.length @@ Production.rhs prod in
-          let lhs = Nonterminal.to_int @@ Production.lhs prod in
-          (rhslen, lhs)
-        ) prods in
-        (Lr1.to_int lr1, mapped)::acc
+    | defaults -> (Lr1.to_int lr1, defaults)::acc
   end) [] |>
   sort_and_merge (List.compare Stdlib.compare) (List.equal Stdlib.(=)) |>
   List.iter (fun (states,lhs) ->
@@ -247,7 +255,7 @@ let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->
           lhs));
   Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state doesn't have any default production\") end\n"
 
-let emit_follow_transition ppf = (* taking reduction (if no default) and transitions *)
+let emit_follow_transition ppf =
   Fmt.pf ppf {|
 (** For a given state and nonterminal,
   returns the state the automaton will be in after taking the transition *)
@@ -272,7 +280,7 @@ let follow_transition: %s -> %s -> %s = fun state nt ->
           next_state));
   Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\")\n"
 
-let emit_transition_tokens ppf = (* taking reduction(if no default) and transitions *)
+let emit_transition_tokens ppf = (* taking transitions *)
   Fmt.pf ppf {|
 (** A list of the possible tokens accepted by the
   automaton in the given state *)
@@ -284,11 +292,17 @@ let transition_tokens: %s -> %s list = fun state ->
       | T term, _ -> terminal_filter_map term
       | N nonterm, _ -> nonterminal_filter_map nonterm
     ) (Lr1.transitions lr1) in
-    let comp_entries = if not @@ has_reducable_productions lr1 then
-      List.fold_left (fun acc (t,_) ->
-        (Option.to_list @@ terminal_filter_map t) @ acc
-        ) comp_entries (Lr1.get_reductions lr1)
-        else comp_entries in
+    (* let comp_entries = List.fold_left (fun acc (prod, idx) -> *)
+    (*   match (Production.rhs prod).(idx) with *)
+    (*   | N nt, _, _ -> acc *)
+    (*   | T t, _, _ -> acc *)
+    (*   | exception _ -> acc *)
+    (* ) comp_entries (Lr0.items @@ Lr1.lr0 lr1) in *)
+    (* let comp_entries = if not @@ has_reducable_productions lr1 then *)
+    (*   List.fold_left (fun acc (t,_) -> *)
+    (*     (Option.to_list @@ terminal_filter_map t) @ acc *)
+    (*     ) comp_entries (Lr1.get_reductions lr1) *)
+    (*     else comp_entries in *)
     if comp_entries == [] then acc
     else (lr1, List.sort_uniq completion_entry_compare comp_entries)::acc
   end) [] |>
