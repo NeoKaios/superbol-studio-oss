@@ -62,6 +62,7 @@ let terminal_filter_map: terminal -> completion_entry option = fun term ->
   Terminal.attributes term |>
   List.exists (fun attrib ->
     Attribute.has_label "keyword" attrib ||
+    Attribute.has_label "completion" attrib ||
     Attribute.has_label "keyword.combined" attrib)
   then
     Some (K term)
@@ -134,7 +135,6 @@ let sort_and_merge compare equal l = l |>
           (key::prev_keys, prev_value)::t
       | _ -> ([key], value)::acc
   end) []
-
 
 (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_firsts ppf =
