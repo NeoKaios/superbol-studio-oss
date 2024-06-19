@@ -288,21 +288,17 @@ let transition_tokens: %s -> %s list = fun state ->
   match state_to_int state with
 |} state_t completion_entry_t;
   Lr1.fold (fun lr1 acc -> begin
-    let comp_entries = List.filter_map (function
-      | T term, _ -> terminal_filter_map term
+    let custom_comp_entries = List.filter_map (function
       | N nonterm, _ -> nonterminal_filter_map nonterm
+      | _ -> None
     ) (Lr1.transitions lr1) in
-    (* let comp_entries = List.fold_left (fun acc (prod, idx) -> *)
-    (*   match (Production.rhs prod).(idx) with *)
-    (*   | N nt, _, _ -> acc *)
-    (*   | T t, _, _ -> acc *)
-    (*   | exception _ -> acc *)
-    (* ) comp_entries (Lr0.items @@ Lr1.lr0 lr1) in *)
-    (* let comp_entries = if not @@ has_reducable_productions lr1 then *)
-    (*   List.fold_left (fun acc (t,_) -> *)
-    (*     (Option.to_list @@ terminal_filter_map t) @ acc *)
-    (*     ) comp_entries (Lr1.get_reductions lr1) *)
-    (*     else comp_entries in *)
+    let token_comp_entries = List.fold_left (fun acc (prod, idx) ->
+      match (Production.rhs prod).(idx) with
+      | N nt, _, _ -> (List.filter_map terminal_filter_map (Nonterminal.first nt)) @ acc
+      | T t, _, _ -> (Option.to_list @@ terminal_filter_map t) @ acc
+      | exception _ -> acc
+    ) [] (Lr0.items @@ Lr1.lr0 lr1) in
+    let comp_entries = custom_comp_entries @ token_comp_entries in
     if comp_entries == [] then acc
     else (lr1, List.sort_uniq completion_entry_compare comp_entries)::acc
   end) [] |>
