@@ -36,37 +36,38 @@ let cmlyname = match !cmlyname with
 include MenhirSdk.Cmly_read.Read (struct let filename = cmlyname end)
 
 type completion_entry =
-  | K of terminal
+  | K of terminal list
   | Custom of string
 (* [@@deriving ord] *)
 
 let completion_entry_equal entry1 entry2 =
   match entry1, entry2 with
-  | K t1, K t2 -> t1 == t2
   | Custom c1, Custom c2 -> c1 == c2
+  | K l1, K l2 -> List.equal Terminal.equal l1 l2
   | _ -> false
 
 let completion_entry_compare entry1 entry2 =
   match entry1, entry2 with
-    | K t1, K t2 -> Terminal.compare t2 t1
     | Custom s1, Custom s2 -> String.compare s2 s1
+    | K l1, K l2 -> List.compare Terminal.compare l1 l2
     | Custom _, K _ -> -1
     | K _, Custom _ -> 1
 
 let pp_completion_entry: completion_entry Fmt.t = fun ppf -> function
-  | K term -> Fmt.pf ppf "K %a" Print.terminal term
+  | K list -> Fmt.pf ppf "K [%a]" (Fmt.list ~sep:(Fmt.any ";") Print.terminal) list
   | Custom custom_type -> Fmt.pf ppf "%s" custom_type
 
-let terminal_filter_map: terminal -> completion_entry option = fun term ->
-  if Terminal.kind term == `REGULAR &&
+
+let terminal_condition: terminal -> bool = fun term ->
+  Terminal.kind term == `REGULAR &&
   Terminal.attributes term |>
   List.exists (fun attrib ->
     Attribute.has_label "keyword" attrib ||
     Attribute.has_label "completion" attrib ||
     Attribute.has_label "keyword.combined" attrib)
-  then
-    Some (K term)
-  else None
+
+let terminal_filter_map: terminal -> completion_entry option = fun term ->
+  if terminal_condition term then Some (K [term]) else None
 
 let nonterminal_filter_map: nonterminal -> completion_entry option = fun nonterm ->
   Nonterminal.attributes nonterm |>
@@ -81,14 +82,14 @@ let nonterminal_t = "nonterminal"
 let emit_pp_completion_entry ppf custom_types = (* For debug *)
   Fmt.pf ppf "\nlet pp_%s: %s Fmt.t = fun ppf -> function\n"
   completion_entry_t completion_entry_t;
-  Fmt.pf ppf "  | K token -> Fmt.pf ppf \"%%s\" @@@@ Grammar_printer.print_token token\n";
+  Fmt.pf ppf "  | K tokens -> Fmt.pf ppf \"%%a\" (Fmt.list ~sep:Fmt.sp Fmt.string) (List.map Grammar_printer.print_token tokens)\n";
   List.iter
   (fun s -> Fmt.pf ppf "  | %s -> Fmt.pf ppf \"%s\"\n" s s)
   custom_types
 
 let emit_completion_entry ppf =
   Fmt.pf ppf "type %s =\n" completion_entry_t;
-  Fmt.pf ppf "  | K of token\n";
+  Fmt.pf ppf "  | K of token list\n";
   let custom_types = Nonterminal.fold (fun nonterm acc ->
     match nonterminal_filter_map nonterm with
     | Some (Custom s) -> (Fmt.pf ppf "  | %s\n" s; s::acc)
@@ -184,8 +185,7 @@ let default_nonterminals lr1 =
       then (Array.length @@ Production.rhs prod, Nonterminal.to_int @@ Production.lhs prod)::acc
       else match rhs.(idx) with
       | N nt, _, _ when Nonterminal.nullable nt -> (0, Nonterminal.to_int nt)::acc
-      | _ -> acc
-      | exception _ -> acc)
+      | _ -> acc)
     [] (Lr0.items lr0) end
 
 let has_reducable_productions lr1: bool =
@@ -232,15 +232,14 @@ let emit_productions ppf =
 end);
       Fmt.pf ppf "*)\n"
 
-let emit_get_default_nonterminal_produced ppf =
+let emit_default_nonterminals ppf =
   Fmt.pf ppf {|
 (** For a given state, compute the list of every nonterminal that can be produced
   without consuming the input.
-  @return (length of production, nonterminal produced) list
-  @raise Invalid_argument if the state has no default *)
-let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->
-  List.map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs))
-  begin match state_to_int state with
+  @return (length of production, nonterminal produced) list *)
+let default_nonterminals: %s -> (int * %s) list = fun state ->
+  List.rev_map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs)) @@@@
+  match state_to_int state with
 |} state_t nonterminal_t;
   Lr1.fold (fun lr1 acc -> begin
     match default_nonterminals lr1 with
@@ -253,7 +252,7 @@ let get_default_nonterminal_produced: %s -> (int * %s) list = fun state ->
           (list ~sep:(any " | ") Fmt.int) states
           (list ~sep:(any ";") (fun ppf (len,lhs) -> pf ppf "(%d,%d)" len lhs))
           lhs));
-  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state doesn't have any default production\") end\n"
+  Fmt.pf ppf "  | _ -> []\n"
 
 let emit_follow_transition ppf =
   Fmt.pf ppf {|
@@ -280,6 +279,38 @@ let follow_transition: %s -> %s -> %s = fun state nt ->
           next_state));
   Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\")\n"
 
+let comp_entries_from_lr1 =
+  let next_tokens_from ~item =
+    let (prod, idx) = item in
+    let rec eagerly_get_terminals rhs i l =
+      match rhs.(i) with
+        | T t, _, _ when terminal_condition t -> eagerly_get_terminals rhs (i+1) (t::l)
+        | _ | exception Invalid_argument _ -> List.rev l
+    in
+      match (Production.rhs prod).(idx) with
+        | N nt, _, _ -> List.filter_map terminal_filter_map (Nonterminal.first nt)
+        | T _, _, _ -> begin
+          match eagerly_get_terminals (Production.rhs prod) idx [] with
+            | [] -> []
+            | l -> [K l] end
+        | exception Invalid_argument _ -> []
+  in
+  Lr1.tabulate begin fun lr1 ->
+    let custom_comp_entries = List.filter_map (function
+      | N nonterm, _ -> nonterminal_filter_map nonterm
+      | _ -> None) (Lr1.transitions lr1) in
+    (* TODO: Map to symbol |> uniq |> map to compentry *)
+    let token_comp_entries = List.fold_left (fun acc item ->
+      next_tokens_from ~item @ acc
+        ) [] (Lr0.items @@ Lr1.lr0 lr1) in
+    (* let token_comp_entries = *)
+    (*   (Lr0.items @@ Lr1.lr0 lr1) *)
+    (*   |> (fun (prod, idx) -> ) *)
+    let comp_entries = custom_comp_entries @ token_comp_entries in
+    if comp_entries == [] then []
+    else List.sort_uniq completion_entry_compare comp_entries
+      end
+
 let emit_transition_tokens ppf = (* taking transitions *)
   Fmt.pf ppf {|
 (** A list of the possible tokens accepted by the
@@ -287,25 +318,15 @@ let emit_transition_tokens ppf = (* taking transitions *)
 let transition_tokens: %s -> %s list = fun state ->
   match state_to_int state with
 |} state_t completion_entry_t;
-  Lr1.fold (fun lr1 acc -> begin
-    let custom_comp_entries = List.filter_map (function
-      | N nonterm, _ -> nonterminal_filter_map nonterm
-      | _ -> None
-    ) (Lr1.transitions lr1) in
-    let token_comp_entries = List.fold_left (fun acc (prod, idx) ->
-      match (Production.rhs prod).(idx) with
-      | N nt, _, _ -> (List.filter_map terminal_filter_map (Nonterminal.first nt)) @ acc
-      | T t, _, _ -> (Option.to_list @@ terminal_filter_map t) @ acc
-      | exception _ -> acc
-    ) [] (Lr0.items @@ Lr1.lr0 lr1) in
-    let comp_entries = custom_comp_entries @ token_comp_entries in
-    if comp_entries == [] then acc
-    else (lr1, List.sort_uniq completion_entry_compare comp_entries)::acc
-  end) [] |>
+  Lr1.fold (fun lr1 acc ->
+    match comp_entries_from_lr1 lr1 with
+      | [] -> acc
+      | l -> (lr1, l)::acc) []
+      |>
   sort_and_merge
     (List.compare completion_entry_compare)
     (List.equal completion_entry_equal)
-          |>
+      |>
   List.iter (fun (states, comp_entries) ->
     Fmt.(pf ppf "  | %a ->\n    [%a]\n"
             (list ~sep:(any " | ") (using Lr1.to_int int)) states
@@ -319,7 +340,7 @@ let emit ppf =
     cmlyname;
     emit_types ppf;
     emit_completion_entry ppf;
-    emit_get_default_nonterminal_produced ppf;
+    emit_default_nonterminals ppf;
     emit_follow_transition ppf;
     emit_transition_tokens ppf;
     (* emit_productions ppf; *)

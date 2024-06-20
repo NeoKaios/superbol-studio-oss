@@ -148,11 +148,11 @@ let map_completion_items ~(range:Range.t) ~group ~filename comp_entries =
             to_completion_item
             ~kind:CompletionItemKind.Module ~range
             (procedure_proposals ~filename range.end_ group)
-        | K token ->
-            let token' = token &@ Srcloc.dummy in
-            try let token = Pretty.to_string "%a" Cobol_parser.INTERNAL.pp_token token' in
-              [completion_item ~kind:CompletionItemKind.Keyword ~range token]
-            with Not_found -> [])
+        | K tokens -> begin
+            let tokens' = List.map (fun t -> t &@ Srcloc.dummy) tokens in
+            try let tokens = Pretty.to_string "%a" (Fmt.list ~sep:Fmt.sp Cobol_parser.INTERNAL.pp_token) tokens' in
+              [completion_item ~kind:CompletionItemKind.Keyword ~range tokens]
+            with Not_found -> [] end)
       comp_entries
 
 (** [listpop l i] pops [i] elements of the list [l]
@@ -166,7 +166,7 @@ let listpop l i =
   in let h, t = inner [] l i in List.rev h, t
 
 let pp_state ppf state = (* for debug *)
-  let has_default = try let _ = Expect.get_default_nonterminal_produced state in true with _ -> false in
+  let has_default = try let _ = Expect.default_nonterminals state in true with _ -> false in
   Fmt.pf ppf "%d%s" (Expect.state_to_int state) (if has_default then "_" else "")
 
 let ce_compare ce1 ce2 =
@@ -186,14 +186,14 @@ let expected_tokens env =
       | [] -> []
       | state::_ ->
           if debug then (Lsp_io.log_debug "In State: %a" pp_state state; let tok = Expect.transition_tokens state in if List.length tok > 0 then Lsp_io.log_debug "Gained %d entries [%a]" (List.length tok) Fmt.(list ~sep:(any ";") Expect.pp_completion_entry) tok);
-          let defaults = try Expect.get_default_nonterminal_produced state with _ -> [] in
+          let defaults = try Expect.default_nonterminals state with _ -> [] in
           let acc = Expect.transition_tokens state @ acc in
           List.fold_left (fun acc (rhslen, lhs) ->
             let _, states = listpop env_stack rhslen in
             match List.hd states with
               | transition_state ->
                   let next = Expect.follow_transition transition_state lhs in
-                  if debug then Lsp_io.log_debug "From %a following %a -> %a" pp_state state pp_state transition_state pp_state next;
+                  if debug then Lsp_io.log_debug "Reduced %a, popped %d, following %a -> %a" pp_state state rhslen pp_state transition_state pp_state next;
                   inner (next::states) acc
               | exception Failure _ ->
                   Lsp_io.log_warn "Had to pop too many states during context completion [%a]"
