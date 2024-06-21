@@ -31,8 +31,41 @@ let cmlyname = match !cmlyname with
   | None | Some "" -> Fmt.epr "%s@." usage_msg; exit 1
   | Some s -> s
 
+(* --- UTILS --- *)
+
+let inv f a b = f b a
+
+(** Find all keys that have the same value and merge them into a single key_list entry *)
+let sort_and_merge compare equal l = l |>
+  List.sort (fun (_, value1) (_, value2) ->
+    compare value1 value2)
+        |>
+  List.fold_left (fun acc (key, value) -> begin
+    match acc with
+      | (prev_keys, prev_value)::t
+        when equal value prev_value ->
+          (key::prev_keys, prev_value)::t
+      | _ -> ([key], value)::acc
+  end) []
+
+let pp_brackets pp =
+  Fmt.(any "[" ++ pp ++ any "]")
+
+let pp_pair pp_a pp_b = fun ppf (a, b) ->
+    Fmt.pf ppf "(%a,%a)" pp_a a pp_b b
+
+let pp_list pp = Fmt.list ~sep:(Fmt.any ";") pp
+
+let pp_match_cases ppf pp_key pp_value default l =
+  List.iter (fun (keys, value) ->
+    Fmt.pf ppf "  | %a -> %a\n"
+      Fmt.(list ~sep:(any " | ") pp_key) keys
+      pp_value value) l;
+  Fmt.pf ppf "  | _ -> %s\n" default
+
 (* --- *)
 
+(* \nmodule NEL = Cobol_common.Basics.NEL *)
 include MenhirSdk.Cmly_read.Read (struct let filename = cmlyname end)
 
 type completion_entry =
@@ -54,7 +87,7 @@ let completion_entry_compare entry1 entry2 =
     | K _, Custom _ -> 1
 
 let pp_completion_entry: completion_entry Fmt.t = fun ppf -> function
-  | K list -> Fmt.pf ppf "K [%a]" (Fmt.list ~sep:(Fmt.any ";") Print.terminal) list
+  | K list -> Fmt.pf ppf "K [%a]" (pp_list Print.terminal) list
   | Custom custom_type -> Fmt.pf ppf "%s" custom_type
 
 
@@ -74,6 +107,42 @@ let nonterminal_filter_map: nonterminal -> completion_entry option = fun nonterm
   List.find_opt (Attribute.has_label "completion") |>
   Option.map Attribute.payload |>
   fun s -> Option.bind s (fun s -> Some (Custom s))
+
+(* --- *)
+
+module SymbolSet = Set.Make(struct
+  type t = symbol
+  let compare = Symbol.compare
+end)
+
+module CompEntrySet = struct
+  include Set.Make(struct
+    type t = completion_entry
+    let compare = completion_entry_compare
+  end)
+  let pp _ppf = ()
+end
+
+module Map5 (OrderedType : Map.OrderedType) = struct
+  include Map.Make(OrderedType)
+
+  let add_to_list x data m =
+    let add = function None -> Some [data] | Some l -> Some (data :: l) in
+    update x add m
+end
+
+module CompEntryMap = Map5(struct
+  type t = CompEntrySet.t
+  let compare = CompEntrySet.compare
+end)
+
+module DefaultNTMap = Map5(struct
+  type t = (int * nonterminal) list
+  let compare = List.compare (fun (i, nt) (i2, nt2) ->
+    match i-i2 with 0 -> Nonterminal.compare nt nt2 | diff -> diff)
+end)
+
+(* --- *)
 
 let completion_entry_t = "completion_entry"
 let state_t = "state"
@@ -121,23 +190,113 @@ include TYPES|}
   state_t nonterminal_t;
   Fmt.cut ppf ();
   Fmt.cut ppf ();
-  (* Fmt.pf ppf "let %s_of_int (state:int): %s = state \n\n" state_type_name state_type_name; *)
   ()
 
-(** Find all keys that have the same value and merge them into a single key_list entry *)
-let sort_and_merge compare equal l = l |>
-  List.sort (fun (_, value1) (_, value2) ->
-    compare value1 value2)
-        |>
-  List.fold_left (fun acc (key, value) -> begin
-    match acc with
-      | (prev_keys, prev_value)::t
-        when equal value prev_value ->
-          (key::prev_keys, prev_value)::t
-      | _ -> ([key], value)::acc
-  end) []
+let default_nonterminals lr1 =
+  List.sort_uniq Stdlib.compare @@
+  match Lr1.default_reduction lr1 with
+  | Some prod -> [(Array.length @@ Production.rhs prod, Production.lhs prod)]
+  | None -> begin
+    let lr0 = Lr1.lr0 lr1 in
+    List.fold_left (fun acc (prod, idx) ->
+      let rhs = Production.rhs prod in
+      if Array.length rhs == idx
+      then (Array.length @@ Production.rhs prod, Production.lhs prod)::acc
+      else match rhs.(idx) with
+      | N nt, _, _ when Nonterminal.nullable nt -> (0, nt)::acc
+      | _ -> acc)
+    [] (Lr0.items lr0) end
 
-(* SHOULD BE REMOVED BEFORE MERGE *)
+let emit_default_nonterminals ppf =
+  Fmt.pf ppf {|
+(** For a given state, compute the list of every nonterminal that can be produced
+  without consuming the input.
+  @return (length of production, nonterminal produced) list *)
+let default_nonterminals: %s -> (int * %s) list = fun state ->
+  List.rev_map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs)) @@@@
+  match state_to_int state with
+|} state_t nonterminal_t;
+  Lr1.fold (fun lr1 acc ->
+    match default_nonterminals lr1 with
+    | [] -> acc
+    | defaults -> DefaultNTMap.add_to_list defaults lr1 acc)
+  DefaultNTMap.empty
+  |> inv (DefaultNTMap.fold (fun s l acc -> (l, s)::acc)) []
+  |> pp_match_cases ppf
+    Fmt.(using Lr1.to_int int)
+    Fmt.(pp_brackets @@ pp_list @@ pp_pair int (using Nonterminal.to_int int))
+    "[]"
+
+let emit_follow_transition ppf =
+  Fmt.pf ppf {|
+(** For a given state and nonterminal,
+  returns the state the automaton will be in after taking the transition *)
+let follow_transition: %s -> %s -> %s = fun state nt ->
+  let state = state_to_int state in
+  let nt = nonterminal_to_int nt in
+  state_of_int @@@@ match state, nt with
+|} state_t nonterminal_t state_t;
+  Lr1.fold (fun lr1 acc -> begin
+    List.fold_left (fun acc (symbol, next_state) ->
+      match symbol with
+      | T _ -> acc
+      | N nt -> ((Lr1.to_int lr1, Nonterminal.to_int nt),
+          Lr1.to_int next_state)::acc
+      ) acc (Lr1.transitions lr1)
+  end) []
+  |> sort_and_merge Int.compare Int.equal
+  |> pp_match_cases ppf
+    Fmt.(pp_pair int int)
+    Fmt.int
+    "raise (Invalid_argument \"This state and nonterminal don't lead to any transition\")"
+
+
+let completion_entries_of ~lr1 =
+  let next_tokens_from ~item =
+    let (prod, idx) = item in
+    let rec eagerly_get_terminals rhs i l =
+      match rhs.(i) with
+        | T t, _, _ when terminal_condition t -> eagerly_get_terminals rhs (i+1) (t::l)
+        | _ | exception Invalid_argument _ -> List.rev l
+    in
+      match (Production.rhs prod).(idx) with
+        | N nt, _, _ -> List.filter_map terminal_filter_map (Nonterminal.first nt)
+        | T _, _, _ -> begin
+          match eagerly_get_terminals (Production.rhs prod) idx [] with
+            | [] -> []
+            | l -> [K l] end
+        | exception Invalid_argument _ -> []
+  in
+  Lr1.tabulate begin fun lr1 ->
+    let custom_comp_entries = List.fold_left (fun acc -> function
+      | N nonterm, _ -> Option.fold ~none:acc
+        ~some:(inv CompEntrySet.add acc) (nonterminal_filter_map nonterm)
+      | _ -> acc)
+    CompEntrySet.empty (Lr1.transitions lr1) in
+    List.fold_left (fun acc item ->
+      CompEntrySet.(union acc (of_list @@ next_tokens_from ~item)))
+    custom_comp_entries (Lr0.items @@ Lr1.lr0 lr1)
+  end lr1
+
+let emit_transition_tokens ppf = (* taking transitions *)
+  Fmt.pf ppf {|
+(** A list of the possible tokens accepted by the
+  automaton in the given state *)
+let transition_tokens: %s -> %s list = fun state ->
+  match state_to_int state with
+|} state_t completion_entry_t;
+  Lr1.fold (fun lr1 acc ->
+    match completion_entries_of ~lr1 with
+      | s when CompEntrySet.is_empty s -> acc
+      | s -> CompEntryMap.add_to_list s lr1 acc)
+  CompEntryMap.empty
+  |> inv (CompEntryMap.fold (fun s l acc -> (l, CompEntrySet.elements s)::acc)) []
+  |> pp_match_cases ppf
+    Fmt.(using Lr1.to_int int)
+    (pp_brackets @@ pp_list pp_completion_entry)
+    "[]"
+
+module DEBUG = struct
 let emit_firsts ppf =
   Nonterminal.iter (fun nonterm ->
     let kind = if Nonterminal.kind nonterm  == `START then "start" else "" in
@@ -146,9 +305,8 @@ let emit_firsts ppf =
       pf ppf "-%a- %s %s\n\t[%a]\n\n"
       Print.nonterminal nonterm
       nullable kind
-      (list ~sep:(any ";") Print.terminal) (Nonterminal.first nonterm)))
+      (pp_list Print.terminal) (Nonterminal.first nonterm)))
 
-  (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_lr0 ppf =
   Lr1.iter (fun lr1 -> begin
     let lr0 = Lr1.lr0 lr1 in
@@ -162,7 +320,7 @@ let emit_lr0 ppf =
       with _ -> None
       ) items in
     let sorted = List.sort_uniq Symbol.compare items in
-    (Fmt.list ~sep:(Fmt.any ";") Print.symbol) ppf sorted;
+    (pp_list Print.symbol) ppf sorted;
     if snd @@ List.fold_left (fun acc s ->
     match acc,s with
     | (true,_), N _ -> (true,true)
@@ -173,29 +331,12 @@ let emit_lr0 ppf =
       Fmt.string ppf "<-OO->" end;
   end)
 
-let default_nonterminals lr1 =
-  List.sort_uniq Stdlib.compare @@
-  match Lr1.default_reduction lr1 with
-  | Some prod -> [(Array.length @@ Production.rhs prod, Nonterminal.to_int @@ Production.lhs prod)]
-  | None -> begin
-    let lr0 = Lr1.lr0 lr1 in
-    List.fold_left (fun acc (prod, idx) ->
-      let rhs = Production.rhs prod in
-      if Array.length rhs == idx
-      then (Array.length @@ Production.rhs prod, Nonterminal.to_int @@ Production.lhs prod)::acc
-      else match rhs.(idx) with
-      | N nt, _, _ when Nonterminal.nullable nt -> (0, Nonterminal.to_int nt)::acc
-      | _ -> acc)
-    [] (Lr0.items lr0) end
-
-let has_reducable_productions lr1: bool =
-  (* SHOULD BE REMOVED BEFORE MERGE *)
-  match default_nonterminals lr1 with
-  | [] -> false
-  | _ -> true
-
-  (* SHOULD BE REMOVED BEFORE MERGE *)
 let emit_productions ppf =
+  let has_reducable_productions lr1: bool =
+    match default_nonterminals lr1 with
+      | [] -> false
+      | _ -> true
+  in
   Fmt.pf ppf "(*";
   Lr1.iter (fun lr1 -> begin
     if not @@ has_reducable_productions lr1 then () else
@@ -231,123 +372,20 @@ let emit_productions ppf =
     (*   Fmt.pf ppf "%a <> %a" Print.terminal t (Fmt.list Print.production) pl)) from_red; *)
 end);
       Fmt.pf ppf "*)\n"
+end
 
-let emit_default_nonterminals ppf =
-  Fmt.pf ppf {|
-(** For a given state, compute the list of every nonterminal that can be produced
-  without consuming the input.
-  @return (length of production, nonterminal produced) list *)
-let default_nonterminals: %s -> (int * %s) list = fun state ->
-  List.rev_map (fun (rhslen, lhs) -> (rhslen, nonterminal_of_int lhs)) @@@@
-  match state_to_int state with
-|} state_t nonterminal_t;
-  Lr1.fold (fun lr1 acc -> begin
-    match default_nonterminals lr1 with
-    | [] -> acc
-    | defaults -> (Lr1.to_int lr1, defaults)::acc
-  end) [] |>
-  sort_and_merge (List.compare Stdlib.compare) (List.equal Stdlib.(=)) |>
-  List.iter (fun (states,lhs) ->
-    Fmt.(pf ppf "  | %a -> [%a]\n"
-          (list ~sep:(any " | ") Fmt.int) states
-          (list ~sep:(any ";") (fun ppf (len,lhs) -> pf ppf "(%d,%d)" len lhs))
-          lhs));
-  Fmt.pf ppf "  | _ -> []\n"
-
-let emit_follow_transition ppf =
-  Fmt.pf ppf {|
-(** For a given state and nonterminal,
-  returns the state the automaton will be in after taking the transition *)
-let follow_transition: %s -> %s -> %s = fun state nt ->
-  let state = state_to_int state in
-  let nt = nonterminal_to_int nt in
-  state_of_int @@@@ match state, nt with
-|} state_t nonterminal_t state_t;
-  Lr1.fold (fun lr1 acc -> begin
-    List.fold_left (fun acc (symbol, next_state) ->
-      match symbol with
-      | T _ -> acc
-      | N nt -> ((Lr1.to_int lr1, Nonterminal.to_int nt),
-          Lr1.to_int next_state)::acc
-      ) acc (Lr1.transitions lr1)
-  end) [] |>
-  sort_and_merge Int.compare Int.equal
-      |>
-  List.iter (fun (state_nt, next_state) ->
-    Fmt.(pf ppf "  | %a -> %d\n"
-          (list ~sep:(any " | ") (fun ppf (s, nt) -> Fmt.pf ppf "(%d,%d)" s nt)) state_nt
-          next_state));
-  Fmt.pf ppf "  | _ -> raise (Invalid_argument \"This state and nonterminal don't lead to any transition\")\n"
-
-let comp_entries_from_lr1 =
-  let next_tokens_from ~item =
-    let (prod, idx) = item in
-    let rec eagerly_get_terminals rhs i l =
-      match rhs.(i) with
-        | T t, _, _ when terminal_condition t -> eagerly_get_terminals rhs (i+1) (t::l)
-        | _ | exception Invalid_argument _ -> List.rev l
-    in
-      match (Production.rhs prod).(idx) with
-        | N nt, _, _ -> List.filter_map terminal_filter_map (Nonterminal.first nt)
-        | T _, _, _ -> begin
-          match eagerly_get_terminals (Production.rhs prod) idx [] with
-            | [] -> []
-            | l -> [K l] end
-        | exception Invalid_argument _ -> []
-  in
-  Lr1.tabulate begin fun lr1 ->
-    let custom_comp_entries = List.filter_map (function
-      | N nonterm, _ -> nonterminal_filter_map nonterm
-      | _ -> None) (Lr1.transitions lr1) in
-    (* TODO: Map to symbol |> uniq |> map to compentry *)
-    let token_comp_entries = List.fold_left (fun acc item ->
-      next_tokens_from ~item @ acc
-        ) [] (Lr0.items @@ Lr1.lr0 lr1) in
-    (* let token_comp_entries = *)
-    (*   (Lr0.items @@ Lr1.lr0 lr1) *)
-    (*   |> (fun (prod, idx) -> ) *)
-    let comp_entries = custom_comp_entries @ token_comp_entries in
-    if comp_entries == [] then []
-    else List.sort_uniq completion_entry_compare comp_entries
-      end
-
-let emit_transition_tokens ppf = (* taking transitions *)
-  Fmt.pf ppf {|
-(** A list of the possible tokens accepted by the
-  automaton in the given state *)
-let transition_tokens: %s -> %s list = fun state ->
-  match state_to_int state with
-|} state_t completion_entry_t;
-  Lr1.fold (fun lr1 acc ->
-    match comp_entries_from_lr1 lr1 with
-      | [] -> acc
-      | l -> (lr1, l)::acc) []
-      |>
-  sort_and_merge
-    (List.compare completion_entry_compare)
-    (List.equal completion_entry_equal)
-      |>
-  List.iter (fun (states, comp_entries) ->
-    Fmt.(pf ppf "  | %a ->\n    [%a]\n"
-            (list ~sep:(any " | ") (using Lr1.to_int int)) states
-            (list ~sep:(any ";") pp_completion_entry) comp_entries));
-  Fmt.pf ppf "  | _ -> []\n"
-
-let emit ppf =
+let () =
+  let ppf = Fmt.stdout in
   Fmt.pf ppf
     "(* Caution: this file was automatically generated from %s; do not edit *)\
      @\nopen Grammar_tokens@\n"
     cmlyname;
-    emit_types ppf;
-    emit_completion_entry ppf;
-    emit_default_nonterminals ppf;
-    emit_follow_transition ppf;
-    emit_transition_tokens ppf;
-    (* emit_productions ppf; *)
-    (* emit_firsts ppf; *)
-    (* emit_lr0 ppf; *)
-    (* Terminal.iter (fun term -> Print.terminal ppf term; Fmt.string ppf ";") *)
-    ()
-
-let () =
-  emit Fmt.stdout
+  emit_types ppf;
+  emit_completion_entry ppf;
+  emit_default_nonterminals ppf;
+  emit_follow_transition ppf;
+  emit_transition_tokens ppf;
+  (* DEBUG.emit_productions ppf; *)
+  (* DEBUG.emit_firsts ppf; *)
+  (* DEBUG.emit_lr0 ppf; *)
+  ()
