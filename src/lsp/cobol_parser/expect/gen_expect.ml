@@ -161,15 +161,31 @@ let emit_pp_completion_entry ppf custom_types = (* For debug *)
   (fun s -> Fmt.pf ppf "  | %s -> Fmt.pf ppf \"%s\"\n" s s)
   custom_types
 
+let emit_complentryset ppf custom_types =
+  Fmt.(pf ppf {|
+module CompEntrySet = Set.Make(struct
+  type t = completion_entry
+  let compare ce1 ce2 =
+    let to_int = function
+      %a| K _ -> %d in
+    match ce1, ce2 with
+      | K nel1, K nel2 -> NEL.compare Stdlib.compare nel2 nel1
+      | _ -> to_int ce1 - to_int ce2
+end)
+|}
+  (list ~sep:nop (fun ppf (i,t) ->
+    pf ppf "| %s -> %d\n    " t i)) (List.mapi (fun i v -> (i,v)) custom_types)
+  (List.length custom_types))
+
 let emit_completion_entry ppf =
   Fmt.pf ppf "type %s =\n" completion_entry_t;
   Fmt.pf ppf "  | K of token NEL.t\n";
   let custom_types = Nonterminal.fold (fun nonterm acc ->
     match nonterminal_filter_map nonterm with
     | Some (Custom s) -> (Fmt.pf ppf "  | %s\n" s; s::acc)
-    | _ -> acc
-  ) [] in
-  emit_pp_completion_entry ppf custom_types
+    | _ -> acc) [] in
+  emit_pp_completion_entry ppf custom_types;
+  emit_complentryset ppf custom_types
 
 let emit_types ppf =
   Fmt.pf ppf {|
@@ -191,9 +207,9 @@ module TYPES: TYPES = struct
   let nonterminal_of_int nt = nt
 end
 
-include TYPES|}
+include TYPES
+|}
   state_t nonterminal_t;
-  Fmt.cut ppf ();
   Fmt.cut ppf ();
   ()
 
@@ -384,7 +400,7 @@ let () =
   Fmt.pf ppf
     "(* Caution: this file was automatically generated from %s; do not edit *)\
      \nmodule NEL = Cobol_common.Basics.NEL
-     @\nopen Grammar_tokens@\n"
+     open Grammar_tokens@\n\n"
     cmlyname;
   emit_types ppf;
   emit_completion_entry ppf;
