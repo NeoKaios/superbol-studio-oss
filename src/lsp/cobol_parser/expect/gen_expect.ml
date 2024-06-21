@@ -11,6 +11,8 @@
 (*                                                                        *)
 (**************************************************************************)
 
+module NEL = Cobol_common.Basics.NEL
+
 let cmlyname = ref None
 let external_tokens = ref ""
 
@@ -56,6 +58,10 @@ let pp_pair pp_a pp_b = fun ppf (a, b) ->
 
 let pp_list pp = Fmt.list ~sep:(Fmt.any ";") pp
 
+let rec pp_nel pp ppf = function
+  | NEL.One v -> Fmt.pf ppf "One %a" pp v
+  | v::nel -> Fmt.pf ppf "%a::" pp v; pp_nel pp ppf nel
+
 let pp_match_cases ppf pp_key pp_value default l =
   List.iter (fun (keys, value) ->
     Fmt.pf ppf "  | %a -> %a\n"
@@ -65,29 +71,28 @@ let pp_match_cases ppf pp_key pp_value default l =
 
 (* --- *)
 
-(* \nmodule NEL = Cobol_common.Basics.NEL *)
 include MenhirSdk.Cmly_read.Read (struct let filename = cmlyname end)
 
 type completion_entry =
-  | K of terminal list
+  | K of terminal NEL.t
   | Custom of string
 (* [@@deriving ord] *)
 
 let completion_entry_equal entry1 entry2 =
   match entry1, entry2 with
   | Custom c1, Custom c2 -> c1 == c2
-  | K l1, K l2 -> List.equal Terminal.equal l1 l2
+  | K nel1, K nel2 -> NEL.equal Terminal.equal nel1 nel2
   | _ -> false
 
 let completion_entry_compare entry1 entry2 =
   match entry1, entry2 with
     | Custom s1, Custom s2 -> String.compare s2 s1
-    | K l1, K l2 -> List.compare Terminal.compare l1 l2
+    | K nel1, K nel2 -> NEL.compare Terminal.compare nel1 nel2
     | Custom _, K _ -> -1
     | K _, Custom _ -> 1
 
 let pp_completion_entry: completion_entry Fmt.t = fun ppf -> function
-  | K list -> Fmt.pf ppf "K [%a]" (pp_list Print.terminal) list
+  | K list -> Fmt.pf ppf "K (%a)" (pp_nel Print.terminal) list
   | Custom custom_type -> Fmt.pf ppf "%s" custom_type
 
 
@@ -100,7 +105,7 @@ let terminal_condition: terminal -> bool = fun term ->
     Attribute.has_label "keyword.combined" attrib)
 
 let terminal_filter_map: terminal -> completion_entry option = fun term ->
-  if terminal_condition term then Some (K [term]) else None
+  if terminal_condition term then Some (K (NEL.One term)) else None
 
 let nonterminal_filter_map: nonterminal -> completion_entry option = fun nonterm ->
   Nonterminal.attributes nonterm |>
@@ -151,14 +156,14 @@ let nonterminal_t = "nonterminal"
 let emit_pp_completion_entry ppf custom_types = (* For debug *)
   Fmt.pf ppf "\nlet pp_%s: %s Fmt.t = fun ppf -> function\n"
   completion_entry_t completion_entry_t;
-  Fmt.pf ppf "  | K tokens -> Fmt.pf ppf \"%%a\" (Fmt.list ~sep:Fmt.sp Fmt.string) (List.map Grammar_printer.print_token tokens)\n";
+  Fmt.pf ppf "  | K tokens -> Fmt.pf ppf \"%%a\" (Fmt.list ~sep:Fmt.sp Fmt.string) (List.map Grammar_printer.print_token @@@@ NEL.to_list tokens)\n";
   List.iter
   (fun s -> Fmt.pf ppf "  | %s -> Fmt.pf ppf \"%s\"\n" s s)
   custom_types
 
 let emit_completion_entry ppf =
   Fmt.pf ppf "type %s =\n" completion_entry_t;
-  Fmt.pf ppf "  | K of token list\n";
+  Fmt.pf ppf "  | K of token NEL.t\n";
   let custom_types = Nonterminal.fold (fun nonterm acc ->
     match nonterminal_filter_map nonterm with
     | Some (Custom s) -> (Fmt.pf ppf "  | %s\n" s; s::acc)
@@ -264,7 +269,7 @@ let completion_entries_of ~lr1 =
         | T _, _, _ -> begin
           match eagerly_get_terminals (Production.rhs prod) idx [] with
             | [] -> []
-            | l -> [K l] end
+            | l -> [K (NEL.of_list l)] end
         | exception Invalid_argument _ -> []
   in
   Lr1.tabulate begin fun lr1 ->
@@ -283,7 +288,7 @@ let emit_transition_tokens ppf = (* taking transitions *)
 (** A list of the possible tokens accepted by the
   automaton in the given state *)
 let transition_tokens: %s -> %s list = fun state ->
-  match state_to_int state with
+  NEL.(match state_to_int state with
 |} state_t completion_entry_t;
   Lr1.fold (fun lr1 acc ->
     match completion_entries_of ~lr1 with
@@ -294,7 +299,7 @@ let transition_tokens: %s -> %s list = fun state ->
   |> pp_match_cases ppf
     Fmt.(using Lr1.to_int int)
     (pp_brackets @@ pp_list pp_completion_entry)
-    "[]"
+    "[])"
 
 module DEBUG = struct
 let emit_firsts ppf =
@@ -378,6 +383,7 @@ let () =
   let ppf = Fmt.stdout in
   Fmt.pf ppf
     "(* Caution: this file was automatically generated from %s; do not edit *)\
+     \nmodule NEL = Cobol_common.Basics.NEL
      @\nopen Grammar_tokens@\n"
     cmlyname;
   emit_types ppf;

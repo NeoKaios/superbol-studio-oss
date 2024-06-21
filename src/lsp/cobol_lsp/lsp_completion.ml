@@ -13,7 +13,7 @@
 
 open EzCompat
 
-open Cobol_common                                                  (* Visitor *)
+open Cobol_common                                                  (* Visitor, NEL *)
 open Cobol_common.Srcloc.INFIX
 
 open Lsp_completion_keywords
@@ -149,7 +149,7 @@ let map_completion_items ~(range:Range.t) ~group ~filename comp_entries =
             ~kind:CompletionItemKind.Module ~range
             (procedure_proposals ~filename range.end_ group)
         | K tokens -> begin
-            let tokens' = List.map (fun t -> t &@ Srcloc.dummy) tokens in
+            let tokens' = List.map (fun t -> t &@ Srcloc.dummy) @@ Basics.NEL.to_list tokens in
             try let tokens = Pretty.to_string "%a" (Fmt.list ~sep:Fmt.sp Cobol_parser.INTERNAL.pp_token) tokens' in
               [completion_item ~kind:CompletionItemKind.Keyword ~range tokens]
             with Not_found -> [] end)
