@@ -156,7 +156,7 @@ let pp_state ppf state = (* for debug *)
 
 let pp_env ppf env = (* for debug *)
   let has_default =
-    try let _ = Expect.default_productions env in true
+    try let _ = Expect.reducable_productions_in ~env in true
     with _ -> false in
   Fmt.pf ppf "%d%s" (Menhir.current_state_number env) (if has_default then "_" else "")
 
@@ -175,15 +175,15 @@ let expected_tokens base_env =
     let pos = match Menhir.top env with
       | None -> snd (Srcloc.as_lexloc Srcloc.dummy)
       | Some Menhir.Element (_, _, _, pos) -> pos in
-    if debug then (Lsp_io.log_debug "In State: %a" pp_env env; let tok = Expect.transition_tokens env in if List.length tok > 0 then Lsp_io.log_debug "Gained %d entries [%a]" (List.length tok) Fmt.(list ~sep:(any ";") Expect.pp_completion_entry) tok);
-    let productions = Expect.default_productions env in
-    let nullables = Expect.nullable_nonterminals env in
+    if debug then (Lsp_io.log_debug "In State: %a" pp_env env; let tok = Expect.acceptable_terminals_in ~env in if List.length tok > 0 then Lsp_io.log_debug "Gained %d entries [%a]" (List.length tok) Fmt.(list ~sep:(any ";") Expect.pp_completion_entry) tok);
+    let productions = Expect.reducable_productions_in ~env in
+    let nullables = Expect.accaptable_nullable_nonterminals_in ~env in
     let acc = Expect.CompEntrySet.add_seq
-      (List.to_seq @@ Expect.transition_tokens env) acc in
+      (List.to_seq @@ Expect.acceptable_terminals_in ~env) acc in
     let acc = List.fold_left (fun acc (Menhir.X sym) ->
       let default_value =
         try Some (Cobol_parser.Recover.default_value sym)
-        with Not_found -> try Some (Expect.nullable_default_value sym)
+        with Not_found -> try Some (Expect.guessed_default_value_of_nullables sym)
         with Not_found -> if debug then  Lsp_io.log_debug "Not found"; None in
       Option.fold ~none:acc ~some:(fun a ->
         let new_env = Menhir.feed sym pos a pos env in

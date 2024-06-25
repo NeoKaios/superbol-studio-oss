@@ -236,7 +236,7 @@ let nullable_nonterminals lr1 =
       | _ | exception Invalid_argument _ -> acc)
   SymbolSet.empty (Lr0.items lr0)
 
-let default_productions lr1 =
+let reducable_productions lr1 =
   List.sort_uniq Stdlib.compare @@
   match Lr1.default_reduction lr1 with (* TODO check if this is needed *)
   | Some prod -> [prod]
@@ -246,12 +246,9 @@ let default_productions lr1 =
       then prod::acc else acc)
     [] (Lr0.items @@ Lr1.lr0 lr1) end
 
-let emit_nullable_nonterminals ppf =
+let emit_accaptable_nullable_nonterminals_in_env ppf =
   Fmt.pf ppf {|
-(** For a given state, compute the list of every nonterminal that can be produced
-  without consuming the input.
-  @return (length of production, nonterminal produced) list *)
-let nullable_nonterminals: _ Menhir.env -> Menhir.xsymbol list = fun env ->
+let accaptable_nullable_nonterminals_in ~env : Menhir.xsymbol list =
   Menhir.(match current_state_number env with
 |};
   Lr1.fold (fun lr1 acc ->
@@ -266,17 +263,14 @@ let nullable_nonterminals: _ Menhir.env -> Menhir.xsymbol list = fun env ->
     (pp_brackets @@ pp_list @@ pp_xsymbol_of_nt)
     "[])"
 
-let emit_default_productions ppf =
+let emit_reducable_productions_in_env ppf =
   Fmt.pf ppf {|
-(** For a given state, compute the list of every nonterminal that can be produced
-  without consuming the input.
-  @return (length of production, nonterminal produced) list *)
-let default_productions: _ Menhir.env -> Menhir.production list = fun env ->
+let reducable_productions_in ~env : Menhir.production list =
   List.rev_map Menhir.find_production @@@@
   match Menhir.current_state_number env with
 |};
   Lr1.fold (fun lr1 acc ->
-    match default_productions lr1 with
+    match reducable_productions lr1 with
     | [] -> acc
     | defaults -> ProdMap.add_to_list defaults lr1 acc)
   ProdMap.empty
@@ -286,7 +280,7 @@ let default_productions: _ Menhir.env -> Menhir.production list = fun env ->
     Fmt.(pp_brackets @@ pp_list @@ (using Production.to_int int))
     "[]"
 
-let emit_follow_transition ppf =
+let emit_follow_transition ppf = (* OLD, may be removed ? *)
   Fmt.pf ppf {|
 (** For a given state and nonterminal,
   returns the state the automaton will be in after taking the transition *)
@@ -336,13 +330,11 @@ let completion_entries_of ~lr1 =
     custom_comp_entries (Lr0.items @@ Lr1.lr0 lr1)
   end lr1
 
-let emit_transition_tokens ppf = (* taking transitions *)
+let emit_acceptable_terminals_in_env ppf = (* taking transitions *)
   Fmt.pf ppf {|
-(** A list of the possible tokens accepted by the
-  automaton in the given state *)
-let transition_tokens: _ Menhir.env -> %s list = fun env ->
+let acceptable_terminals_in ~env : completion_entry list =
   NEL.(match Menhir.current_state_number env with
-|} completion_entry_t;
+|};
   Lr1.fold (fun lr1 acc ->
     match completion_entries_of ~lr1 with
       | s when CompEntrySet.is_empty s -> acc
@@ -381,11 +373,9 @@ let default_attribute_payload nt =
   |> List.find_opt (Attribute.has_label "default")
   |> Option.map Attribute.payload
 
-let emit_nullable_default_value ppf =
+let emit_default_value_of_nullables ppf =
   Fmt.pf ppf {|
-(** @return A sementic value for a nullable nonterminal symbol
-    @raise Not_found *)
-let nullable_default_value (type a): a Menhir.symbol -> a = function
+let guessed_default_value_of_nullables (type a): a Menhir.symbol -> a = function
   | T _ -> raise Not_found
   | N nt -> begin match nt with
 |};
@@ -465,10 +455,10 @@ let () =
 
   emit_types ppf;
   emit_completion_entry ppf;
-  emit_default_productions ppf;
-  emit_nullable_nonterminals ppf;
-  emit_transition_tokens ppf;
-  emit_nullable_default_value ppf;
+  emit_reducable_productions_in_env ppf;
+  emit_accaptable_nullable_nonterminals_in_env ppf;
+  emit_acceptable_terminals_in_env ppf;
+  emit_default_value_of_nullables ppf;
 
   (* emit_follow_transition ppf; *)
   (* DEBUG.emit_firsts ppf; *)
