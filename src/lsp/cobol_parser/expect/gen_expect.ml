@@ -406,20 +406,6 @@ let nullable_default_value (type a): a Menhir.symbol -> a = function
     "raise Not_found end"
 
 module DEBUG = struct
-let default_nonterminals lr1 =
-  List.sort_uniq Stdlib.compare @@
-  match Lr1.default_reduction lr1 with
-  | Some prod -> [(Array.length @@ Production.rhs prod, Production.lhs prod)]
-  | None -> begin
-    let lr0 = Lr1.lr0 lr1 in
-    List.fold_left (fun acc (prod, idx) ->
-      let rhs = Production.rhs prod in
-      if Array.length rhs == idx
-      then (Array.length @@ Production.rhs prod, Production.lhs prod)::acc
-      else match rhs.(idx) with
-      | N nt, _, _ when Nonterminal.nullable nt -> (0, nt)::acc
-      | _ -> acc)
-    [] (Lr0.items lr0) end
 
 let emit_firsts ppf =
   Nonterminal.iter (fun nonterm ->
@@ -431,80 +417,39 @@ let emit_firsts ppf =
       nullable kind
       (pp_list Print.terminal) (Nonterminal.first nonterm)))
 
-let emit_lr0 ppf =
+let emit_state_productions ppf =
   Lr1.iter (fun lr1 -> begin
     let lr0 = Lr1.lr0 lr1 in
     let items = Lr0.items lr0 in
-    Fmt.pf Fmt.stdout "\nState %d -%d-:\n" (Lr0.to_int lr0) (Lr1.to_int lr1);
+    Fmt.pf Fmt.stdout "\nState lr1-%d- lr0(%d):\n%a"
+      (Lr1.to_int lr1) (Lr0.to_int lr0)
+      Fmt.(option ~none:nop (any "DEFAULT-PROD: " ++ Print.production))
+      (Lr1.default_reduction lr1);
     Print.itemset Fmt.stdout items;
-    let items = List.filter_map (fun (prod,idx) ->
-      let rhs = Production.rhs prod in
-      try let (symbol, _,_) = rhs.(idx) in
-      Some symbol
-      with _ -> None
-      ) items in
-    let sorted = List.sort_uniq Symbol.compare items in
-    (pp_list Print.symbol) ppf sorted;
-    if snd @@ List.fold_left (fun acc s ->
-    match acc,s with
-    | (true,_), N _ -> (true,true)
-    | (false,_), N _ -> (true,false)
-    | _ -> acc
-    ) (false,false) sorted then begin
-    (* if List.length sorted < List.length items then begin *)
-      Fmt.string ppf "<-OO->" end;
+    let reductions = Lr1.get_reductions lr1 in
+    Fmt.pf ppf "TRANSITIONS [%a]\n"
+      (Fmt.list ~sep:(Fmt.any "; ") (fun ppf (s, i) ->
+        Fmt.pf ppf "%a(%d)" Print.symbol s (Lr1.to_int i))) (Lr1.transitions lr1);
+    Fmt.pf ppf "REDUCTIONS [%a]\n"
+      Fmt.(list ~sep:(any "; ") (using fst Print.terminal)) reductions;
   end)
 
-let emit_productions ppf =
-  let has_reducable_productions lr1: bool =
-    match default_nonterminals lr1 with
-      | [] -> false
-      | _ -> true
-  in
-  Fmt.pf ppf "(*";
-  Lr1.iter (fun lr1 -> begin
-    if not @@ has_reducable_productions lr1 then () else
-    let lr0 = Lr1.lr0 lr1 in
-    let items = Lr0.items lr0 in
-    if not @@ List.fold_left (fun acc (prod,idx) ->
-      let rhs = Production.rhs prod in
-      match rhs.(idx) with
-      | T _,_,_ -> acc
-      | N nt,_,_ -> Nonterminal.nullable nt || acc
-      | exception _ -> acc
-    ) false items then () else (
-    Fmt.pf Fmt.stdout "State %d -%d-: %a" (Lr0.to_int lr0) (Lr1.to_int lr1)
-    (Fmt.option ~none:Fmt.cut Print.production) (Lr1.default_reduction lr1);
-    Print.itemset Fmt.stdout items;
-    Fmt.string ppf "\n")
-    (* let items = List.filter_map (fun (prod,idx) -> *)
-    (*   try let rhs = Production.rhs prod in *)
-    (*   let (symbol, _,_) = rhs.(idx) in *)
-    (*   Some symbol *)
-    (* with _ -> None *)
-    (*   ) items in *)
-    (* let from_red = Lr1.reductions lr1 in *)
-    (* let from_tra = Lr1.transitions lr1 in *)
-    (* Fmt.pf ppf "  | %d\t ->tra [%a]\n" *)
-    (*   (Lr1.to_int lr1) *)
-    (*   (Fmt.list ~sep:(Fmt.any ";") (fun ppf (s,i) -> *)
-    (*     Fmt.pf ppf "%a(%d)" Print.symbol s (Lr1.to_int i))) from_tra; *)
-    (* Fmt.pf ppf "==> %a\n" (Fmt.list ~sep:(Fmt.any ";") Print.symbol) (List.sort_uniq Symbol.compare items); *)
-    (*   Fmt.pf ppf "  | %d\t ->red [%a]\n" *)
-    (* (Lr1.to_int lr1) *)
-    (* (Fmt.list ~sep:(Fmt.any ";") (fun ppf (t,pl) -> *)
-    (*   Fmt.pf ppf "%a <> %a" Print.terminal t (Fmt.list Print.production) pl)) from_red; *)
-end);
-      Fmt.pf ppf "*)\n"
-
 let emit_nullable_unrecoverable ppf =
-  Nonterminal.iter (fun nt -> begin
+  let nt_without_default = Nonterminal.fold (fun nt acc -> begin
     if is_nullable_without_recovery nt
+    && default_attribute_payload nt |> Option.is_none
     && Nonterminal.typ nt
       |> inv Option.bind (guess_default_value @@ Nonterminal.mangled_name nt)
       |> Option.is_none
-    then Fmt.pf ppf "%s  (%s)\n" (Nonterminal.mangled_name nt) (Option.value ~default:"no typ" @@ Nonterminal.typ nt)
-end)
+    then nt::acc else acc
+  end) [] in
+  if nt_without_default == []
+  then Fmt.string ppf "All nullable nonterminals have a recovery/default/guessed-default"
+  else List.iter (fun nt ->
+    Fmt.pf ppf "%s  (%s)\n"
+      (Nonterminal.mangled_name nt)
+      (Option.value ~default:"no typ" @@ Nonterminal.typ nt))
+  nt_without_default
 
 end
 
@@ -517,14 +462,16 @@ let () =
      \nmodule Menhir = Grammar.MenhirInterpreter\
      \nopen Grammar_tokens@\n\n"
     cmlyname;
+
   emit_types ppf;
   emit_completion_entry ppf;
   emit_default_productions ppf;
   emit_nullable_nonterminals ppf;
   emit_transition_tokens ppf;
   emit_nullable_default_value ppf;
+
   (* emit_follow_transition ppf; *)
-  (* DEBUG.emit_nullable_unrecoverable ppf; *)
   (* DEBUG.emit_firsts ppf; *)
-  (* DEBUG.emit_lr0 ppf; *)
+  (* DEBUG.emit_state_productions ppf; *)
+  (* DEBUG.emit_nullable_unrecoverable ppf; *)
   ()
