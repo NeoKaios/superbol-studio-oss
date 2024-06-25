@@ -148,9 +148,6 @@ let listpop l i =
     | hd::tl -> inner (hd::h) tl (i-1)
   in let h, t = inner [] l i in List.rev h, t
 
-let pp_expect_state ppf state = (* for debug *)
-  Fmt.pf ppf "%d" (Expect.state_to_int state)
-
 let pp_state ppf state = (* for debug *)
   Fmt.pf ppf "%d" (Menhir.number state)
 
